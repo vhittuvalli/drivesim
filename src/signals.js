@@ -18,6 +18,16 @@ export class Signals {
     this.offsets = Array.from({ length: GRID * GRID }, () => rand() * CYCLE);
   }
 
+  // Shift an intersection's cycle so `axis` turned green `into` seconds ago (scenarios).
+  force([i, j], axis, into = 0) {
+    let start = 0;
+    for (const p of PHASES) {
+      if (p[axis] === 'green') break;
+      start += p.dur;
+    }
+    this.offsets[i * GRID + j] = (((start + into - this.t) % CYCLE) + CYCLE) % CYCLE;
+  }
+
   update(dt) {
     this.t += dt;
   }

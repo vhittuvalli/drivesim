@@ -1,7 +1,7 @@
 // Ego vehicle: kinematic bicycle model + a procedurally modeled sedan with an AV sensor rig.
 // Physics heading h: forward = (cos h, sin h) in (x, z). Positive steer turns right.
 import * as THREE from 'three';
-import { clamp, WHEELBASE, MAX_STEER, MAX_SPEED } from './config.js';
+import { clamp, conditions, WHEELBASE, MAX_STEER, MAX_SPEED } from './config.js';
 const WHEEL_R = 0.34;
 
 export class Vehicle {
@@ -21,7 +21,7 @@ export class Vehicle {
     const maxRate = 1.6 * dt;
     this.steer += clamp(target - this.steer, -maxRate, maxRate);
     const t = clamp(throttleCmd, -1, 1);
-    this.accel = t >= 0 ? 3.2 * t : 7.5 * t;
+    this.accel = t >= 0 ? 3.2 * t * Math.min(1, conditions.grip * 1.3) : 7.5 * t * conditions.grip;
     const drag = 0.0025 * this.v * this.v + (this.v > 0 ? 0.08 : 0);
     this.v = clamp(this.v + (this.accel - drag) * dt, 0, MAX_SPEED);
     this.h += (this.v / WHEELBASE) * Math.tan(this.steer) * dt;
@@ -30,7 +30,13 @@ export class Vehicle {
     this.wheelSpin -= (this.v * dt) / WHEEL_R;
   }
 
-  syncMesh(night) {
+  // Teleport (scenario setup, respawn); keeps the mesh.
+  reset(x, z, h, v = 0) {
+    Object.assign(this, { x, z, h, v, steer: 0, accel: 0 });
+  }
+
+  // `lights` is how dark it is for headlight purposes (night, rain, fog).
+  syncMesh(night, lights = night) {
     const m = this.mesh;
     m.position.set(this.x, 0, this.z);
     m.rotation.y = -this.h;
@@ -43,9 +49,9 @@ export class Vehicle {
       if (w.front) w.pivot.rotation.y = -this.steer;
     }
     const braking = this.accel < -0.5;
-    m.userData.tail.emissiveIntensity = braking ? 6 : 0.6 + night * 1.2;
-    m.userData.head.emissiveIntensity = 0.3 + night * 8;
-    m.userData.headLight.intensity = night * 40;
+    m.userData.tail.emissiveIntensity = braking ? 6 : 0.6 + lights * 1.2;
+    m.userData.head.emissiveIntensity = 0.3 + lights * 8;
+    m.userData.headLight.intensity = lights * 40;
   }
 }
 

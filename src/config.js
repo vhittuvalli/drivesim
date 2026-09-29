@@ -26,6 +26,11 @@ export const STOREFRONT_H = 4.5;
 export const CITY_MIN = -PITCH * 1.5;
 export const CITY_SIZE = PITCH * (GRID + 2);
 
+// Road conditions shared by vehicle dynamics and every driver. Set by the weather preset:
+// grip scales tire friction (braking, cornering); visibility caps speed so a driver can stop
+// within the distance they can see.
+export const conditions = { grip: 1, visibility: Infinity };
+
 export function mulberry32(seed) {
   let a = seed >>> 0;
   return () => {
