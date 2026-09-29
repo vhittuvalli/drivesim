@@ -7,6 +7,7 @@ import { Signals } from './signals.js';
 import { Traffic } from './traffic.js';
 import { Crowd } from './peds.js';
 import { SCENARIOS } from './scenarios.js';
+import { SafetyDriver } from './safety.js';
 
 export const WEATHER = {
   clear: { label: 'Clear', grip: 1, visibility: Infinity },
@@ -59,6 +60,12 @@ export class World {
     this.traffic.addDoubleParked(doubleParked, this.expert.agent);
     this.t = 0;
     this.manual = null; // input source {read(dt, v) -> {steer, throttle}} while a human drives
+    // Learned driver {control(world, expertCtrl, dt) -> {steer, throttle} | null}; the expert
+    // runs in shadow mode and the safety driver can take over.
+    this.policy = null;
+    this.safety = new SafetyDriver();
+    this.steerNoise = null; // (dt) -> steering perturbation, for recovery training data
+    this.expertCtrl = null; // what the expert did or would have done this step (labels)
     this.scenario = null;
     this.contacts = 0;
     this.lastContact = null;
@@ -82,7 +89,17 @@ export class World {
       const cmd = this.manual.read(dt, this.car.v);
       c = { steer: cmd.steer, throttle: cmd.throttle, acc: 0, reason: null, manual: true };
     } else {
-      c = this.expert.control(this.car, agents, dt);
+      const exp = this.expert.control(this.car, agents, dt);
+      this.expertCtrl = exp;
+      c = exp;
+      if (this.policy) {
+        const nn = this.policy.control(this, exp, dt);
+        c = nn ? this.safety.step(this, exp, nn, dt) : { ...exp, driver: 'expert' };
+      }
+      if (this.steerNoise) {
+        const n = this.steerNoise(dt);
+        c = { ...c, steer: c.steer + n, noise: n };
+      }
     }
     this.car.step(dt, c.steer, c.throttle);
     this.traffic.step(dt, agents, this.expert.agent);
@@ -121,6 +138,11 @@ export class World {
 
   takeOver(input) {
     this.manual = input;
+  }
+
+  setPolicy(policy) {
+    this.policy = policy;
+    this.safety.reset();
   }
 
   // Give control back to the expert; it needs a lane to start from.
