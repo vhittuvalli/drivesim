@@ -12,6 +12,8 @@ import { City } from './city.js';
 import { Signals } from './signals.js';
 import { Vehicle } from './vehicle.js';
 import { Route, Expert } from './planner.js';
+import { Fleet } from './fleet.js';
+import { placeParkedCars } from './traffic.js';
 
 const $ = (id) => document.getElementById(id);
 const DT = 1 / 60;
@@ -107,6 +109,7 @@ function applyTimeOfDay(hour) {
     mats.shop.emissiveIntensity = 0.05 + night * 0.8;
     mats.lamp.emissiveIntensity = night * 6;
   }
+  fleet?.setNight(night);
   bloom.strength = 0.15 + night * 0.3;
   bloom.threshold = night > 0.3 ? 0.85 : 0.95;
 
@@ -120,7 +123,7 @@ function applyTimeOfDay(hour) {
 }
 
 // ---------- world ----------
-let mats, city, signals, car, route, expert;
+let mats, city, signals, car, route, expert, fleet, parked;
 
 async function init() {
   setLoading('Loading photo-scanned textures…');
@@ -130,6 +133,9 @@ async function init() {
   city = new City(mats, rand);
   scene.add(city.group);
   signals = new Signals(rand);
+  fleet = new Fleet(260);
+  scene.add(fleet.group);
+  parked = placeParkedCars(city, fleet, rand);
   city.setSignalColors((n, a) => signals.state(n, a));
 
   route = new Route(rand);
