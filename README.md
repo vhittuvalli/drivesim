@@ -1,34 +1,37 @@
 # DriveSim
 
-End-to-end self-driving sandbox that runs entirely in the browser.
-
-**Pipeline:** procedural world (road, lanes, traffic lights, cones) → 64×64 ego camera pixels → CNN (TF.js) → steering + throttle → kinematic bicycle model → next frame.
+Browser-based self-driving simulator (three.js / WebGL, no build step).
 
 ## Run
 
-    npm run dev        # or: python3 -m http.server 8000
+    npm run dev        # python3 -m http.server 8000
     open http://localhost:8000
 
-## Workflow
+URL params: `?seed=<int>` (city layout), `?hour=4..22` (time of day), `?cam=chase|hood|orbit|top`.
+Keys: `1`–`4` switch camera, `Space` pauses.
 
-1. **Collect**: the Expert (pure pursuit + ground-truth rules) drives with steering noise. Click *Start recording* (8× sim speed helps). About 3–5k samples is enough.
-2. **Train**: behavioral cloning on (pixels, speed) → expert (steer, throttle).
-3. **Drive**: switch to *Neural net*. Metrics track distance per incident.
-4. **Improve (DAgger)**: keep recording while the NN drives. The expert still labels every frame, so the model learns to recover from its own mistakes. Retrain.
+## Status
 
-The *safety supervisor* is a rule-based layer that can only brake (red lights and obstacles). Turn it off to see what the NN alone has learned.
+- **Phase 1: 3D city (done).** Procedural street grid with signalized intersections, buildings, street furniture, day/night lighting, and an expert driver that follows a random route.
+- Phase 2: traffic and pedestrians.
+- Phase 3: realistic sensor model (noise, blur, exposure, weather, latency).
+- Phase 4: neural driving policy trained on sensor data.
+
+The 2D prototype lives in `legacy/` (`/legacy/` on the dev server).
 
 ## Layout
 
 | File | Role |
 |---|---|
-| `src/world.js` | Track generation, lights, cones, projection helpers, rendering |
-| `src/sensor.js` | Ego camera → raw RGB pixels |
-| `src/car.js` | Vehicle dynamics |
-| `src/expert.js` | Teacher driver + safety supervisor |
-| `src/brain.js` | Dataset ring buffer, CNN, training loop |
-| `src/main.js` | Sim loop, rendering, UI |
+| `src/config.js` | City dimensions, vehicle constants, helpers |
+| `src/materials.js` | PBR textures, procedural facades/storefronts, ground shader patch (anti-tiling, wear, night light pools) |
+| `src/city.js` | Grid, sidewalks, markings, buildings, street lights, trees, signal hardware |
+| `src/signals.js` | Fixed-time signal controller |
+| `src/vehicle.js` | Bicycle-model physics + sedan model with sensor rig |
+| `src/planner.js` | Route generation + expert driver (pure pursuit, speed profile, signal stops) |
+| `src/main.js` | Renderer, sky/sun, post-processing, cameras, HUD |
 
-## Deploy
+## Assets
 
-Static site with no build step. Push to GitHub Pages, Vercel, or Netlify as-is.
+Textures in `assets/tex/` are from [Poly Haven](https://polyhaven.com) (CC0): asphalt_02, concrete_pavement,
+concrete_floor_worn_02, brick_wall_02, concrete_panels, clay_plaster, bark_brown_02.

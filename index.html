@@ -5,117 +5,61 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>DriveSim</title>
   <link rel="stylesheet" href="style.css">
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
 </head>
 <body>
-  <main id="stage">
-    <canvas id="view"></canvas>
-    <div id="hud">
-      <span id="hud-driver" class="badge">EXPERT</span>
-      <span id="hud-speed" class="badge mono">0 km/h</span>
-      <span id="hud-rec" class="badge rec" hidden>● REC</span>
-      <span id="hud-paused" class="badge" hidden>PAUSED</span>
-      <span id="hud-override" class="badge warn" hidden></span>
-    </div>
-    <canvas id="minimap" width="180" height="180"></canvas>
-    <div id="toast"></div>
-  </main>
+  <canvas id="view"></canvas>
 
-  <aside id="panel">
-    <header>
-      <h1>DriveSim</h1>
-      <p>World → camera pixels → neural net → steering &amp; throttle</p>
-    </header>
+  <div id="hud-left">
+    <div class="card speedo"><span id="speed">0</span><small>km/h</small></div>
+    <div class="card" id="maneuver-card"><div id="maneuver"></div></div>
+    <div class="card signal" id="signal" hidden><i></i><span id="signal-text"></span></div>
+  </div>
 
-    <section>
-      <h2>Driver</h2>
+  <div id="hud-right" class="card small mono">
+    <div><span id="clock"></span> · <span id="fps"></span></div>
+    <div class="muted">seed <span id="seed"></span></div>
+  </div>
+
+  <div id="controls" class="card">
+    <div class="group">
+      <label>Camera</label>
       <div class="seg">
-        <button data-driver-btn="expert" class="active">Expert</button>
-        <button data-driver-btn="neural">Neural net</button>
-        <button data-driver-btn="manual">Manual</button>
+        <button data-cam="chase">Chase</button>
+        <button data-cam="hood">Sensor</button>
+        <button data-cam="orbit">Orbit</button>
+        <button data-cam="top">Top</button>
       </div>
-      <label class="check"><input type="checkbox" id="chk-supervisor" checked> Safety supervisor (can only brake)</label>
-    </section>
-
-    <section>
-      <h2>Camera sensor <span class="muted">64×64 RGB</span></h2>
-      <div class="sensor-row">
-        <canvas id="sensor" width="64" height="64"></canvas>
-        <div class="bars">
-          <div class="bar-label">Steer</div>
-          <div class="bar"><i id="bar-steer-expert" class="c-expert"></i></div>
-          <div class="bar"><i id="bar-steer-nn" class="c-nn"></i></div>
-          <div class="bar"><i id="bar-steer-cmd" class="c-cmd"></i></div>
-          <div class="bar-label">Throttle / brake</div>
-          <div class="bar"><i id="bar-thr-expert" class="c-expert"></i></div>
-          <div class="bar"><i id="bar-thr-nn" class="c-nn"></i></div>
-          <div class="bar"><i id="bar-thr-cmd" class="c-cmd"></i></div>
-          <div class="legend"><span class="c-expert"></span>expert <span class="c-nn"></span>neural <span class="c-cmd"></span>applied</div>
-        </div>
-      </div>
-    </section>
-
-    <section>
-      <h2>Data collection</h2>
+    </div>
+    <div class="group grow">
+      <label>Time of day</label>
+      <input type="range" id="hour" min="4" max="22" step="0.05" value="14.5">
+    </div>
+    <div class="group">
+      <label>Sim</label>
       <div class="row">
-        <button id="btn-record">Start recording</button>
-        <button id="btn-clear" class="ghost">Clear</button>
+        <select id="sim-speed"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select>
+        <button id="btn-pause">Pause</button>
+        <button id="btn-city">New city</button>
       </div>
-      <label class="slider">Steering noise (expert only) <span id="noise-val" class="mono">0.15</span>
-        <input type="range" id="rng-noise" min="0" max="0.5" step="0.01" value="0.15">
-      </label>
-      <div class="meter"><i id="ds-fill"></i></div>
-      <div class="muted mono" id="ds-count">0 / 8,000</div>
-    </section>
-
-    <section>
-      <h2>Training <span class="muted" id="model-status">untrained</span></h2>
+    </div>
+    <div class="group">
+      <label>Quality</label>
       <div class="row">
-        <label class="inline">Epochs <input type="number" id="inp-epochs" value="8" min="1" max="100"></label>
-        <button id="btn-train" disabled>Train</button>
+        <label class="check"><input type="checkbox" id="chk-shadows" checked> Shadows</label>
+        <label class="check"><input type="checkbox" id="chk-bloom" checked> Post FX</label>
       </div>
-      <div class="meter"><i id="train-fill"></i></div>
-      <pre id="train-log"></pre>
-      <div class="row">
-        <button id="btn-save" class="ghost">Save</button>
-        <button id="btn-load" class="ghost">Load</button>
-        <button id="btn-reset-model" class="ghost">Reset</button>
-      </div>
-      <div class="muted small">CNN · <span id="param-count"></span> params · TF.js <span id="tf-backend"></span></div>
-    </section>
+    </div>
+  </div>
 
-    <section>
-      <h2>Simulation</h2>
-      <div class="row">
-        <label class="inline">Speed
-          <select id="sel-speed">
-            <option value="1">1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option>
-          </select>
-        </label>
-        <button id="btn-pause" class="ghost">Pause</button>
-        <button id="btn-world" class="ghost">New world</button>
-      </div>
-      <label class="check"><input type="checkbox" id="chk-chase" checked> Chase camera</label>
-      <div class="muted small">World seed <span id="seed" class="mono"></span></div>
-    </section>
-
-    <section>
-      <h2>Metrics <span class="muted" id="metrics-driver"></span></h2>
-      <dl class="metrics">
-        <dt>Distance</dt><dd id="m-dist" class="mono"></dd>
-        <dt>Crashes</dt><dd id="m-crashes" class="mono"></dd>
-        <dt>Red lights run</dt><dd id="m-violations" class="mono"></dd>
-        <dt>Stalls</dt><dd id="m-interventions" class="mono"></dd>
-        <dt>Distance / incident</dt><dd id="m-mpi" class="mono"></dd>
-        <dt>Since last incident</dt><dd id="m-since" class="mono"></dd>
-      </dl>
-      <button id="btn-reset-stats" class="ghost small-btn">Reset metrics</button>
-    </section>
-
-    <section class="muted small">
-      Keys: <b>1</b>/<b>2</b>/<b>3</b> driver · <b>R</b> record · <b>Space</b> pause · arrows drive (manual) · scroll to zoom
-    </section>
-  </aside>
+  <div id="loading"><div class="spinner"></div><div id="loading-text">Loading…</div></div>
 
   <script type="module" src="src/main.js"></script>
 </body>
