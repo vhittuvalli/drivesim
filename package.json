@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "python3 scripts/serve.py 8000",
     "test": "node --test test/*.test.js",
-    "fuzz": "node test/fuzz.mjs"
+    "fuzz": "node test/fuzz.mjs",
+    "train": ".venv/bin/python train/train.py"
   }
 }

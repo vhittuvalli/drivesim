@@ -2,3 +2,5 @@ node_modules/
 .DS_Store
 .venv/
 data/
+models/*.pt
+__pycache__/
