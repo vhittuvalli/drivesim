@@ -2,17 +2,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mulberry32 } from '../src/config.js';
-import { BODY_TYPES } from '../src/bodytypes.js';
+import { FakeFleet } from './helpers.js';
 import { HALF_LEN } from '../src/planner.js';
 import { Signals } from '../src/signals.js';
 import { Traffic } from '../src/traffic.js';
-
-// Minimal stand-in for the instanced renderer.
-class FakeFleet {
-  acquire(type) { return { type, idx: 0, spec: BODY_TYPES[type] }; }
-  release() {}
-  set() {}
-}
 
 function simulate(seed, cars, seconds) {
   const rand = mulberry32(seed);

@@ -2,16 +2,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mulberry32, ROAD_W, GRID, PITCH } from '../src/config.js';
-import { BODY_TYPES } from '../src/bodytypes.js';
+import { FakeFleet } from './helpers.js';
 import { Signals } from '../src/signals.js';
 import { Traffic } from '../src/traffic.js';
 import { Crowd } from '../src/peds.js';
-
-class FakeFleet {
-  acquire(type) { return { type, idx: 0, spec: BODY_TYPES[type] }; }
-  release() {}
-  set() {}
-}
 
 // Distance from (x, z) to the nearest road centerline, and whether it's inside an intersection box.
 function roadInfo(x, z) {

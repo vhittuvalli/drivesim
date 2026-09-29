@@ -1,23 +1,10 @@
 // Headless tests for routing and driving logic. Run with `npm test`.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mulberry32, clamp, WHEELBASE, MAX_STEER, MAX_SPEED } from '../src/config.js';
+import { mulberry32 } from '../src/config.js';
+import { Car } from './helpers.js';
 import { Route, Expert, idm, IDM, HALF_LEN } from '../src/planner.js';
 import { Signals } from '../src/signals.js';
-
-// Same dynamics as src/vehicle.js without the three.js mesh.
-class Car {
-  constructor(x, z, h) { Object.assign(this, { x, z, h, v: 0, steer: 0 }); }
-  step(dt, s, t) {
-    const tg = clamp(s, -1, 1) * MAX_STEER;
-    this.steer += clamp(tg - this.steer, -1.6 * dt, 1.6 * dt);
-    const a = t >= 0 ? 3.2 * t : 7.5 * t;
-    this.v = clamp(this.v + (a - 0.0025 * this.v * this.v - (this.v > 0 ? 0.08 : 0)) * dt, 0, MAX_SPEED);
-    this.h += (this.v / WHEELBASE) * Math.tan(this.steer) * dt;
-    this.x += this.v * Math.cos(this.h) * dt;
-    this.z += this.v * Math.sin(this.h) * dt;
-  }
-}
 
 function drive(seed, seconds) {
   const rand = mulberry32(seed);
