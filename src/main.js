@@ -9,13 +9,16 @@ import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { mulberry32, clamp } from './config.js';
 import { createMaterials, cityUniforms } from './materials.js';
 import { City } from './city.js';
-import { Signals } from './signals.js';
 import { Vehicle } from './vehicle.js';
-import { Route, Expert } from './planner.js';
 import { Fleet } from './fleet.js';
-import { placeParkedCars, Traffic } from './traffic.js';
-import { Crowd } from './peds.js';
+import { placeParkedCars } from './traffic.js';
 import { CrowdRenderer } from './pedRender.js';
+import { World, WEATHER, setWeather } from './sim.js';
+import { SCENARIOS } from './scenarios.js';
+import { DriverInput, DRIVE_KEYS } from './input.js';
+import { DebugOverlay } from './debug.js';
+import { LOOK, HAZE, Precipitation } from './weather.js';
+import { Recorder } from './recorder.js';
 
 const $ = (id) => document.getElementById(id);
 const DT = 1 / 60;
@@ -29,6 +32,10 @@ const settings = {
   speed: 1,
   cars: Number(params.get('cars') ?? 40),
   peds: Number(params.get('peds') ?? 70),
+  vans: Number(params.get('vans') ?? 4), // double-parked delivery vans
+  weather: WEATHER[params.get('weather')] ? params.get('weather') : 'clear',
+  scenario: SCENARIOS[params.get('scenario')] ? params.get('scenario') : '',
+  debug: params.get('debug') === '1',
   paused: false,
   shadows: true,
   bloom: true,
@@ -84,7 +91,7 @@ scene.add(moon);
 scene.fog = new THREE.FogExp2(0xc8d2dc, 0.0022);
 
 const sunDir = new THREE.Vector3();
-let night = 0;
+let night = 0, lightsOn = 0;
 
 function applyTimeOfDay(hour) {
   // Sun path: rises ~6:00 in the east (+x), sets ~18:00 in the west, peaks at 62 degrees.
@@ -95,19 +102,25 @@ function applyTimeOfDay(hour) {
   sunDir.setFromSphericalCoords(1, phi, theta);
   skyU.sunPosition.value.copy(sunDir);
 
+  const look = LOOK[settings.weather];
   night = clamp((2 - elev) / 8, 0, 1);
-  const golden = clamp(1 - Math.abs(elev - 6) / 14, 0, 1);
-  sun.intensity = clamp(elev / 10, 0, 1) * 7.5;
+  lightsOn = Math.max(night, look.lights);
+  const golden = clamp(1 - Math.abs(elev - 6) / 14, 0, 1) * look.sun;
+  sun.intensity = clamp(elev / 10, 0, 1) * 7.5 * look.sun;
   sun.color.setHSL(0.09, 0.4 + golden * 0.5, 0.85 - golden * 0.12);
   moon.intensity = night * 0.9;
-  scene.environmentIntensity = THREE.MathUtils.lerp(0.5, 0.06, night);
+  skyU.turbidity.value = look.turbidity;
+  scene.environmentIntensity = THREE.MathUtils.lerp(0.5, 0.06, night) * look.env;
   renderer.toneMappingExposure = THREE.MathUtils.lerp(1.0, 1.5, night);
 
   const fogDay = new THREE.Color(0xbfcad6), fogGold = new THREE.Color(0xd8b99a), fogNight = new THREE.Color(0x0b0e15);
   scene.fog.color.copy(fogDay).lerp(fogGold, golden * 0.6).lerp(fogNight, night);
-  scene.fog.density = 0.0022 + night * 0.001;
+  scene.fog.color.lerp(HAZE.clone().multiplyScalar(THREE.MathUtils.lerp(1, 0.1, night)), look.haze);
+  scene.fog.density = (0.0022 + night * 0.001) * look.fog;
 
   cityUniforms.uNight.value = night;
+  cityUniforms.uWet.value = look.wet;
+  cityUniforms.uSnow.value = look.snow;
   if (mats) {
     for (const m of Object.values(mats.facades)) m.emissiveIntensity = 0.02 + night * 0.7;
     mats.shop.emissiveIntensity = 0.05 + night * 0.8;
@@ -118,8 +131,10 @@ function applyTimeOfDay(hour) {
   bloom.threshold = night > 0.3 ? 0.85 : 0.95;
 
   // Night sky: the Sky shader goes black below the horizon; tint it deep blue.
-  scene.background = night > 0.95 ? new THREE.Color(0x05070d) : null;
-  sky.visible = night <= 0.95;
+  // Overcast weather: a flat sky the color of the fog.
+  const overcast = look.haze > 0.5;
+  scene.background = overcast ? scene.fog.color.clone() : night > 0.95 ? new THREE.Color(0x05070d) : null;
+  sky.visible = !overcast && night <= 0.95;
 
   if (envRT) envRT.dispose();
   envRT = pmrem.fromScene(envScene, 0.02);
@@ -127,7 +142,8 @@ function applyTimeOfDay(hour) {
 }
 
 // ---------- world ----------
-let mats, city, signals, car, route, expert, fleet, parked, traffic, crowd, crowdView;
+let mats, city, car, fleet, world, crowdView, debugView, precip, recorder;
+const driver = new DriverInput();
 
 async function init() {
   setLoading('Loading photo-scanned textures…');
@@ -136,27 +152,25 @@ async function init() {
   await new Promise((r) => setTimeout(r, 0));
   city = new City(mats, rand);
   scene.add(city.group);
-  signals = new Signals(rand);
   fleet = new Fleet(260);
   scene.add(fleet.group);
-  parked = placeParkedCars(city, fleet, rand);
-  city.setSignalColors((n, a) => signals.state(n, a));
+  const parked = placeParkedCars(city, fleet, rand);
 
-  route = new Route(rand);
-  const p0 = route.pts[0], p1 = route.pts[1];
-  car = new Vehicle(p0.x, p0.z, Math.atan2(p1.z - p0.z, p1.x - p0.x));
+  car = new Vehicle(0, 0, 0);
   scene.add(car.mesh);
-  expert = new Expert(route, signals);
-  expert.track(car);
-  traffic = new Traffic(fleet, signals, rand);
-  traffic.setCount(settings.cars, expert.agent);
-  crowd = new Crowd(signals, rand);
-  crowd.setCount(settings.peds);
+  setWeather(settings.weather);
+  world = new World({ rand, car, fleet, parked, cars: settings.cars, peds: settings.peds, doubleParked: settings.vans });
+  city.setSignalColors((n, a) => world.signals.state(n, a));
   crowdView = new CrowdRenderer(scene, rand);
+  debugView = new DebugOverlay();
+  precip = new Precipitation(scene);
+  recorder = new Recorder(renderer, scene);
   setLoading('Loading pedestrians…');
   await crowdView.ready.catch((e) => console.warn('Pedestrian model failed to load', e));
 
-  applyTimeOfDay(settings.hour);
+  setWeatherUI(settings.weather);
+  setDebug(settings.debug);
+  if (settings.scenario) startScenario(settings.scenario);
   $('seed').textContent = seed;
   $('hour').value = settings.hour;
   setCam(settings.cam);
@@ -219,18 +233,7 @@ function updateCamera(dtReal) {
 }
 
 // ---------- loop ----------
-let last = performance.now(), acc = 0, fpsAcc = 0, fpsN = 0, lastCtrl = null, lastSigT = 0;
-
-function step() {
-  signals.update(DT);
-  const vehicles = [expert.agent, ...traffic.agents];
-  const agents = [...vehicles, ...crowd.agents];
-  const c = expert.control(car, agents);
-  car.step(DT, c.steer, c.throttle);
-  traffic.step(DT, agents, expert.agent);
-  crowd.step(DT, vehicles);
-  lastCtrl = c;
-}
+let last = performance.now(), acc = 0, fpsAcc = 0, fpsN = 0, lastSigT = 0, seenContacts = 0;
 
 function frame(now) {
   const dtReal = Math.min(0.1, (now - last) / 1000);
@@ -239,20 +242,30 @@ function frame(now) {
     acc += dtReal * settings.speed;
     let n = 0;
     while (acc >= DT && n++ < 40) {
-      step();
+      world.step(DT);
       acc -= DT;
     }
   }
   if (now - lastSigT > 100) {
-    city.setSignalColors((n, a) => signals.state(n, a));
+    city.setSignalColors((n, a) => world.signals.state(n, a));
     lastSigT = now;
   }
-  car.syncMesh(night);
-  traffic.sync();
-  crowdView.sync(crowd.peds, settings.paused ? 0 : dtReal * settings.speed, camera);
+  const simDt = settings.paused ? 0 : dtReal * settings.speed;
+  car.syncMesh(night, lightsOn);
+  world.traffic.sync();
+  crowdView.sync(world.crowd.peds, simDt, camera);
   updateCamera(dtReal);
+  debugView.update(world);
+  precip.update(simDt, camera);
   if (settings.bloom) composer.render();
   else renderer.render(scene, camera);
+  debugView.render(renderer, camera);
+  if (recorder.active && world.ctrl) {
+    recorder.capture(world.t, car, world.ctrl, { weather: settings.weather, hour: settings.hour });
+    $('rec-count').textContent = recorder.count;
+  }
+  if (world.contacts > seenContacts && !world.scenario) toast(`Contact with ${world.lastContact.what}!`);
+  seenContacts = world.contacts;
 
   fpsAcc += dtReal;
   fpsN++;
@@ -264,12 +277,17 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 
+const OT_TEXT = { passing: '⇠ Overtaking', returning: '⇢ Merging back', aborting: '↩ Aborting pass' };
+
 function updateHud() {
   $('speed').textContent = `${Math.round(car.v * 3.6)}`;
-  const c = lastCtrl;
+  updateScenarioCard();
+  const c = world.ctrl;
   if (!c) return;
-  const turn = c.nextTurn;
-  $('maneuver').textContent = turn ? `${{ left: '↰ Left', right: '↱ Right', straight: '↑ Straight' }[turn.kind]} in ${Math.max(0, Math.round(turn.dist))} m` : '';
+  const turn = c.nextTurn, ot = c.overtake;
+  $('maneuver').textContent = c.manual
+    ? `Manual · ${driver.source === 'gamepad' ? 'gamepad' : 'WASD / arrows'}`
+    : OT_TEXT[ot?.state] ?? (turn ? `${{ left: '↰ Left', right: '↱ Right', straight: '↑ Straight' }[turn.kind]} in ${Math.max(0, Math.round(turn.dist))} m` : '');
   const sig = c.signal;
   const el = $('signal');
   if (sig && sig.dist < 90) {
@@ -277,16 +295,125 @@ function updateHud() {
     el.dataset.state = sig.state;
     $('signal-text').textContent = `${sig.state} · ${Math.max(0, Math.round(sig.dist))} m`;
   } else el.hidden = true;
-  const why = { vehicle: 'Following vehicle', pedestrian: 'Yielding to pedestrian', yield: 'Yielding to oncoming traffic', box: 'Waiting for space past the intersection', signal: null }[c.reason];
+  const why = {
+    vehicle: 'Following vehicle', pedestrian: 'Yielding to pedestrian', yield: 'Yielding to oncoming traffic',
+    box: 'Waiting for space past the intersection', crossing: 'Yielding to crossing vehicle',
+    'overtake-wait': `Waiting to pass · ${ot?.why ?? ''}`, signal: null,
+  }[c.reason];
   $('reason').hidden = !why;
-  if (why) $('reason').textContent = c.lead && c.reason !== 'yield' ? `${why} · ${Math.round(c.lead.gap)} m` : why;
-  $('traffic-count').textContent = traffic.cars.length;
-  $('ped-count').textContent = crowd.peds.length;
+  if (why) $('reason').textContent = c.lead && !['yield', 'overtake-wait'].includes(c.reason) ? `${why} · ${Math.round(c.lead.gap)} m` : why;
+  $('traffic-count').textContent = world.traffic.background.length;
+  $('ped-count').textContent = world.crowd.peds.length;
   const h = settings.hour;
   $('clock').textContent = `${String(Math.floor(h)).padStart(2, '0')}:${String(Math.floor((h % 1) * 60)).padStart(2, '0')}`;
 }
 
+function updateScenarioCard() {
+  const run = world.scenario, card = $('scenario-card');
+  card.hidden = !run;
+  if (!run) return;
+  $('sc-name').textContent = run.def.name;
+  $('sc-status').textContent = run.status;
+  $('sc-status').dataset.status = run.status;
+  $('sc-msg').textContent = run.message;
+  $('sc-time').textContent = `${run.t.toFixed(1)} s`;
+  $('sc-closest').textContent = Number.isFinite(run.closest) ? `closest ${run.closest.toFixed(1)} m` : '';
+}
+
+let toastTimer = null;
+function toast(msg) {
+  const el = $('toast');
+  el.textContent = msg;
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (el.hidden = true), 2600);
+}
+
+// ---------- scenarios, weather, tools ----------
+
+function startScenario(id) {
+  settings.scenario = id;
+  $('scenario').value = id;
+  if (id) world.startScenario(id);
+  else world.endScenario();
+  seenContacts = world.contacts;
+  setCam(settings.cam);
+  updateHud();
+}
+
+function setWeatherUI(name) {
+  settings.weather = name;
+  $('weather').value = name;
+  setWeather(name);
+  precip.set(name);
+  applyTimeOfDay(settings.hour);
+}
+
+function setDebug(on) {
+  settings.debug = on;
+  debugView.visible = on;
+  $('btn-debug').classList.toggle('active', on);
+}
+
+let handBackFailedAt = -Infinity;
+function toggleDrive() {
+  if (world.manual) {
+    const r = world.handBack();
+    if (!r.ok && performance.now() - handBackFailedAt < 4000) {
+      world.snapToLane();
+      toast('Moved to the nearest lane · expert driving');
+    } else if (!r.ok) {
+      handBackFailedAt = performance.now();
+      toast(`Can't hand back: ${r.reason} · press M again to reset onto the road`);
+      return;
+    } else toast('Expert driving');
+  } else {
+    document.activeElement?.blur();
+    world.takeOver(driver);
+    toast('You have the wheel · WASD / arrows or a gamepad · M to hand back');
+  }
+  $('btn-drive').classList.toggle('active', !!world.manual);
+  updateHud();
+}
+
+function toggleRecord() {
+  if (recorder.active) {
+    recorder.stop();
+    toast(`Saved ${recorder.count} frames`);
+  } else {
+    recorder.start({ seed, weather: settings.weather, hour: settings.hour, scenario: settings.scenario || null });
+    toast('Recording the roof camera at 10 Hz · R to stop and download');
+  }
+  $('btn-rec').classList.toggle('active', recorder.active);
+  $('rec').hidden = !recorder.active;
+}
+
+function shareLink() {
+  const q = new URLSearchParams({ seed, hour: settings.hour.toFixed(2), cam: settings.cam, cars: settings.cars, peds: settings.peds, vans: settings.vans, weather: settings.weather });
+  if (settings.scenario) q.set('scenario', settings.scenario);
+  if (settings.debug) q.set('debug', '1');
+  const url = `${location.origin}${location.pathname}?${q}`;
+  history.replaceState(null, '', `?${q}`);
+  navigator.clipboard?.writeText(url).then(() => toast('Link copied'), () => prompt('Copy this link', url));
+}
+
 // ---------- UI ----------
+
+// Settings panel can be hidden so it doesn't cover the car; remembered per browser.
+function setControlsVisible(on) {
+  $('controls').hidden = !on;
+  $('controls-show').hidden = on;
+  try {
+    localStorage.setItem('drivesim.controls', on ? 'shown' : 'hidden');
+  } catch {}
+}
+let controlsShown = true;
+try {
+  controlsShown = localStorage.getItem('drivesim.controls') !== 'hidden';
+} catch {}
+setControlsVisible(controlsShown);
+$('controls-hide').addEventListener('click', () => setControlsVisible(false));
+$('controls-show').addEventListener('click', () => setControlsVisible(true));
 function resize() {
   const w = canvas.clientWidth, h = canvas.clientHeight;
   renderer.setSize(w, h, false);
@@ -312,13 +439,22 @@ $('hour').addEventListener('input', (e) => {
 $('cars').value = settings.cars;
 $('cars').addEventListener('input', (e) => {
   settings.cars = +e.target.value;
-  traffic.setCount(settings.cars, expert.agent);
+  world.traffic.setCount(settings.cars, world.ego);
 });
 $('peds').value = settings.peds;
 $('peds').addEventListener('input', (e) => {
   settings.peds = +e.target.value;
-  crowd.setCount(settings.peds);
+  world.crowd.setCount(settings.peds);
 });
+for (const [id, def] of Object.entries(SCENARIOS)) $('scenario').append(new Option(def.name, id));
+$('scenario').addEventListener('change', (e) => startScenario(e.target.value));
+$('btn-restart').addEventListener('click', () => startScenario(settings.scenario));
+for (const [id, w] of Object.entries(WEATHER)) $('weather').append(new Option(w.label, id));
+$('weather').addEventListener('change', (e) => setWeatherUI(e.target.value));
+$('btn-drive').addEventListener('click', toggleDrive);
+$('btn-debug').addEventListener('click', () => setDebug(!settings.debug));
+$('btn-rec').addEventListener('click', toggleRecord);
+$('btn-link').addEventListener('click', shareLink);
 $('sim-speed').addEventListener('change', (e) => (settings.speed = +e.target.value));
 $('btn-pause').addEventListener('click', () => {
   settings.paused = !settings.paused;
@@ -334,12 +470,21 @@ $('chk-shadows').addEventListener('change', (e) => {
 });
 $('chk-bloom').addEventListener('change', (e) => (settings.bloom = e.target.checked));
 window.addEventListener('keydown', (e) => {
+  if (e.target.closest?.('input, select, textarea') || !world) return;
+  const key = e.key.toLowerCase();
+  if (world.manual && DRIVE_KEYS.has(key)) return e.preventDefault();
   const map = { 1: 'chase', 2: 'hood', 3: 'orbit', 4: 'top' };
-  if (map[e.key]) setCam(map[e.key]);
-  if (e.key === ' ') $('btn-pause').click();
+  if (map[key]) setCam(map[key]);
+  else if (key === ' ') {
+    e.preventDefault();
+    $('btn-pause').click();
+  } else if (key === 'm') toggleDrive();
+  else if (key === 'o') setDebug(!settings.debug);
+  else if (key === 'r') toggleRecord();
+  else if (key === 'h') setControlsVisible($('controls').hidden);
 });
 
-window.__dbg = { scene, sun, renderer, camera, cityUniforms, get orbit() { return orbit; }, get crowd() { return crowd; } };
+window.__dbg = { scene, sun, renderer, camera, cityUniforms, get orbit() { return orbit; }, get world() { return world; } };
 init().catch((err) => {
   console.error(err);
   setLoading(`Failed to start: ${err.message}`);

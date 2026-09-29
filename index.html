@@ -24,12 +24,24 @@
     <div class="card" id="reason" hidden></div>
   </div>
 
-  <div id="hud-right" class="card small mono">
-    <div><span id="clock"></span> · <span id="fps"></span></div>
-    <div class="muted">seed <span id="seed"></span></div>
+  <div id="hud-right">
+    <div class="card small mono">
+      <div><span id="clock"></span> · <span id="fps"></span></div>
+      <div class="muted">seed <span id="seed"></span></div>
+      <div id="rec" hidden><i class="dot"></i> REC <span id="rec-count">0</span></div>
+    </div>
+    <div class="card" id="scenario-card" hidden>
+      <div class="row between"><b id="sc-name"></b><span id="sc-status" class="pill"></span></div>
+      <div id="sc-msg"></div>
+      <div class="small mono muted"><span id="sc-time"></span> <span id="sc-closest"></span></div>
+    </div>
   </div>
 
+  <div id="toast" class="card" hidden></div>
+
+  <button id="controls-show" class="card" title="Show settings (H)" hidden>⚙ Settings</button>
   <div id="controls" class="card">
+    <button id="controls-hide" title="Hide settings (H)" aria-label="Hide settings">×</button>
     <div class="group">
       <label>Camera</label>
       <div class="seg">
@@ -50,6 +62,26 @@
     <div class="group">
       <label>Pedestrians · <span id="ped-count">0</span></label>
       <input type="range" id="peds" min="0" max="200" step="1" value="70">
+    </div>
+    <div class="group">
+      <label>Scenario</label>
+      <div class="row">
+        <select id="scenario"><option value="">Free drive</option></select>
+        <button id="btn-restart" title="Restart scenario">↻</button>
+      </div>
+    </div>
+    <div class="group">
+      <label>Weather</label>
+      <select id="weather"></select>
+    </div>
+    <div class="group">
+      <label>Tools</label>
+      <div class="row">
+        <button id="btn-drive" title="Take the wheel (M)">Drive</button>
+        <button id="btn-debug" title="Planner overlay (O)">Debug</button>
+        <button id="btn-rec" title="Record the roof camera as a dataset (R)">Record</button>
+        <button id="btn-link" title="Copy a link to this setup">Link</button>
+      </div>
     </div>
     <div class="group">
       <label>Sim</label>

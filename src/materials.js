@@ -14,6 +14,8 @@ export const cityUniforms = {
   uCityMin: { value: new THREE.Vector2(CITY_MIN, CITY_MIN) },
   uCitySize: { value: new THREE.Vector2(CITY_SIZE, CITY_SIZE) },
   uNight: { value: 0 },
+  uWet: { value: 0 }, // rain: darker, glossier ground with puddles
+  uSnow: { value: 0 }, // patchy snow cover
 };
 
 function loadImage(name) {
@@ -97,7 +99,8 @@ export function patchGround(mat, { detail = false, pools = true, antiTile = fals
         varying vec2 vCityXZ;
         uniform sampler2D uMacro, uDetail, uPools;
         uniform vec2 uCityMin, uCitySize;
-        uniform float uNight;`,
+        uniform float uNight, uWet, uSnow;
+        float puddleMask() { return smoothstep(0.5, 0.62, texture2D(uMacro, vCityXZ / 23.0).g); }`,
       )
       .replace(
         '#include <map_fragment>',
@@ -112,7 +115,16 @@ export function patchGround(mat, { detail = false, pools = true, antiTile = fals
           float m = texture2D(uMacro, vCityXZ / 53.0).r * 0.65 + texture2D(uMacro, vCityXZ / 11.3).g * 0.35;
           diffuseColor.rgb *= mix(0.8, 1.15, m);
           ${detail ? 'diffuseColor.rgb *= texture2D(uDetail, (vCityXZ - uCityMin) / uCitySize).rgb;' : ''}
+          diffuseColor.rgb *= 1.0 - uWet * (0.3 + 0.2 * puddleMask());
+          float snowCover = uSnow * smoothstep(0.32, 0.55, texture2D(uMacro, vCityXZ / 7.0).r * 0.6 + m * 0.4);
+          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.9, 0.92, 0.95), snowCover);
         }`,
+      )
+      .replace(
+        '#include <roughnessmap_fragment>',
+        `#include <roughnessmap_fragment>
+        roughnessFactor = mix(roughnessFactor, mix(0.32, 0.04, puddleMask()), uWet);
+        roughnessFactor = mix(roughnessFactor, 0.85, uSnow * 0.6);`,
       )
       .replace(
         '#include <emissivemap_fragment>',
