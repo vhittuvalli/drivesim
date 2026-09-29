@@ -100,6 +100,7 @@ function bodyParts(t) {
 const TAIL_ON = new THREE.Color(5, 0.15, 0.08);
 const TAIL_OFF = new THREE.Color(0.55, 0.03, 0.02);
 const TAIL_NIGHT = new THREE.Color(1.6, 0.06, 0.03);
+const TAIL_HAZARD = new THREE.Color(5, 1.9, 0.1);
 
 export class Fleet {
   constructor(capacityPerType) {
@@ -159,7 +160,8 @@ export class Fleet {
     this.types[h.type].free.push(h.idx);
   }
 
-  set(h, x, z, heading, braking) {
+  // lights: true (braking), 'hazard' (amber flash on), or false.
+  set(h, x, z, heading, lights) {
     const t = this.types[h.type];
     this._q.setFromAxisAngle(this._up, -heading);
     this._p.set(x, 0, z);
@@ -168,7 +170,7 @@ export class Fleet {
       m.setMatrixAt(h.idx, this._m);
       m.instanceMatrix.needsUpdate = true;
     }
-    t.meshes.tail.setColorAt(h.idx, braking ? TAIL_ON : this.night > 0.3 ? TAIL_NIGHT : TAIL_OFF);
+    t.meshes.tail.setColorAt(h.idx, lights === 'hazard' ? TAIL_HAZARD : lights ? TAIL_ON : this.night > 0.3 ? TAIL_NIGHT : TAIL_OFF);
     t.meshes.tail.instanceColor.needsUpdate = true;
   }
 

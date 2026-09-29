@@ -1,6 +1,6 @@
 // Pedestrian simulation (no rendering). Pedestrians walk the sidewalks between intersection
 // corners, cross at crosswalks during the parallel green phase, and occasionally jaywalk.
-import { ROAD_W, SIDEWALK_W, GRID, nodePos, inGrid } from './config.js';
+import { ROAD_W, SIDEWALK_W, GRID, PITCH, nodePos, inGrid } from './config.js';
 
 const WALK_LINE = ROAD_W / 2 + SIDEWALK_W / 2; // sidewalk centerline, from road center
 const P_JAYWALK = 0.06; // chance per sidewalk edge
@@ -40,24 +40,68 @@ export class Crowd {
     this.rand = rand;
     this.peds = [];
     this.jaywalks = 0;
+    this.avoid = []; // {x, z, r}: keep random spawns out of these areas (scenarios)
   }
 
   get agents() {
     return this.peds.map((p) => p.agent);
   }
 
+  // Background pedestrians count (scripted ones don't count).
   setCount(n) {
-    while (this.peds.length > n) this.peds.pop();
-    while (this.peds.length < n) this.spawn();
+    const bg = () => this.peds.filter((p) => !p.scripted);
+    while (bg().length > n) this.remove(bg().pop());
+    while (bg().length < n) this.spawn();
+  }
+
+  remove(p) {
+    const i = this.peds.indexOf(p);
+    if (i >= 0) this.peds.splice(i, 1);
+  }
+
+  clearScripted() {
+    this.peds = this.peds.filter((p) => !p.scripted);
+  }
+
+  // Move background pedestrians out of the given areas (they respawn elsewhere).
+  clearNear(areas) {
+    for (const p of this.peds.filter((p) => !p.scripted && areas.some((a) => Math.hypot(p.x - a.x, p.z - a.z) < a.r))) {
+      this.remove(p);
+      this.spawn();
+    }
+  }
+
+  // A pedestrian at (x, z) that waits (mode 'hold') until the scenario sets queue[0].go, then
+  // follows `path` (waypoints {x, z, mode}); afterwards walks to the nearest corner and
+  // continues as a normal pedestrian.
+  spawnScripted(x, z, path, { speed = 1.4 } = {}) {
+    const p = new Pedestrian(this.rand);
+    Object.assign(p, { x, z, speed, scripted: true });
+    const end = path[path.length - 1];
+    const i = Math.round(end.x / PITCH), j = Math.round(end.z / PITCH), N = nodePos(i, j);
+    // The nearest corner of the block we end up on (never the far side of a road).
+    const corner = { i, j, sx: Math.sign(end.x - N.x) || 1, sz: Math.sign(end.z - N.z) || 1 };
+    p.corner = corner;
+    p.queue = [{ x, z, mode: 'hold', go: false }, ...path, { ...p.pos(corner), mode: 'walk' }];
+    const first = path[0];
+    p.h = Math.atan2(first.z - z, first.x - x);
+    this.sync(p);
+    this.peds.push(p);
+    return p;
   }
 
   spawn() {
     const r = this.rand;
     const p = new Pedestrian(r);
-    let c;
+    let c, tries = 0;
     do {
       c = { i: Math.floor(r() * GRID), j: Math.floor(r() * GRID), sx: r() < 0.5 ? -1 : 1, sz: r() < 0.5 ? -1 : 1 };
-    } while (!inGrid(c.i + c.sx, c.j) && !inGrid(c.i, c.j + c.sz)); // outward-facing edge corners are dead ends
+      // Outward-facing edge corners are dead ends.
+      if (!inGrid(c.i + c.sx, c.j) && !inGrid(c.i, c.j + c.sz)) continue;
+      const q = p.pos(c);
+      if (tries++ < 20 && this.avoid.some((a) => Math.hypot(q.x - a.x, q.z - a.z) < a.r)) continue;
+      break;
+    } while (true);
     p.corner = c;
     this.plan(p, { sidewalkOnly: true });
     // Start part-way along the first edge.
@@ -140,6 +184,12 @@ export class Crowd {
       const wp = p.queue[0];
       if (!wp) {
         this.plan(p);
+        continue;
+      }
+      if (wp.mode === 'hold') {
+        p.v = 0;
+        if (wp.go) p.queue.shift();
+        this.sync(p);
         continue;
       }
       if (wp.mode === 'wait') {
