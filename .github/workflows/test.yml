@@ -14,3 +14,4 @@ jobs:
         with:
           node-version: 22
       - run: npm test
+      - run: npm run fuzz -- 8 2
