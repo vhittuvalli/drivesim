@@ -21,6 +21,7 @@
     <div class="card speedo"><span id="speed">0</span><small>km/h</small></div>
     <div class="card" id="maneuver-card"><div id="maneuver"></div></div>
     <div class="card signal" id="signal" hidden><i></i><span id="signal-text"></span></div>
+    <div class="card" id="reason" hidden></div>
   </div>
 
   <div id="hud-right" class="card small mono">
@@ -41,6 +42,10 @@
     <div class="group grow">
       <label>Time of day</label>
       <input type="range" id="hour" min="4" max="22" step="0.05" value="14.5">
+    </div>
+    <div class="group">
+      <label>Traffic · <span id="traffic-count">0</span> cars</label>
+      <input type="range" id="cars" min="0" max="120" step="1" value="40">
     </div>
     <div class="group">
       <label>Sim</label>

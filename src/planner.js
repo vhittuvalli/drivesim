@@ -181,6 +181,8 @@ export function pathAhead(route, s, k, horizon = 45, step = 1.5) {
 }
 
 // Closest agent (vehicle or pedestrian) that lies on our path ahead.
+// Vehicles are tested at front, center and rear so oblique conflicts inside intersections
+// are caught, not just agents whose center sits on our path.
 // Returns gap (front bumper to the agent's near edge) and its speed along our path.
 export function pathObstacle(samples, agents, self) {
   let best = { gap: Infinity, v: 0, agent: null };
@@ -189,12 +191,20 @@ export function pathObstacle(samples, agents, self) {
   for (const a of agents) {
     if (a === self || a.parked) continue;
     if (Math.abs(a.x - o.x) > reach || Math.abs(a.z - o.z) > reach) continue;
-    const r = a.kind === 'ped' ? 1.9 : 2.0;
+    let pts, r;
+    if (a.kind === 'car') {
+      const e = a.halfLen - 0.9, cx = Math.cos(a.h) * e, cz = Math.sin(a.h) * e;
+      pts = [[a.x, a.z], [a.x + cx, a.z + cz], [a.x - cx, a.z - cz]];
+      r = 1.85;
+    } else {
+      pts = [[a.x, a.z]];
+      r = 1.9;
+    }
     const r2 = r * r;
     for (const q of samples) {
       if (q.d >= best.gap) break;
-      if ((q.x - a.x) ** 2 + (q.z - a.z) ** 2 < r2) {
-        const gap = Math.max(0, q.d - (a.kind === 'car' ? a.halfLen : 0.3));
+      if (pts.some(([x, z]) => (q.x - x) ** 2 + (q.z - z) ** 2 < r2)) {
+        const gap = Math.max(0, q.d - (a.kind === 'car' ? 0.9 : 0.3));
         if (gap < best.gap) {
           const vAlong = a.kind === 'car' ? a.v * Math.max(0, Math.cos(a.h - q.h)) : 0;
           best = { gap, v: vAlong, agent: a };
@@ -216,29 +226,51 @@ export function idm(v, v0, gap, vLead = 0, p = IDM) {
 
 // Combined longitudinal decision: returns acceleration plus the reason for the binding constraint.
 export function longitudinal(v, v0, sig, obs, p = IDM) {
+  // Don't block the box: hold at the line if the vehicle ahead is crawling inside or just past
+  // the intersection, so we can't get stranded in it when the cross street turns green.
+  let sigGap = sig.gap;
+  const st = sig.stop;
+  if (st && !Number.isFinite(sigGap) && st.dist > -0.5 && st.dist < 20 && obs.agent?.kind === 'car' && obs.v < 2 && obs.gap < st.dist + ROAD_W + 7) {
+    sigGap = Math.max(st.dist, 0);
+    st.boxBlocked = true;
+  } else if (st) {
+    st.boxBlocked = false;
+  }
   // Stop ~1 m before the line: IDM settles at s0, so shift the line by (s0 - 1).
-  const aSig = idm(v, v0, sig.gap + (p.s0 - 1), 0, p);
+  const aSig = idm(v, v0, sigGap + (p.s0 - 1), 0, p);
   const aObs = idm(v, v0, obs.gap, obs.v, p);
   const aFree = idm(v, v0, Infinity, 0, p);
   const acc = clamp(Math.min(aSig, aObs, aFree), -8, p.a);
   let reason = null;
-  if (acc < aFree - 0.05) reason = aObs <= aSig ? (obs.agent?.kind === 'ped' ? 'pedestrian' : 'vehicle') : sig.stop?.yielding ? 'yield' : 'signal';
+  if (acc < aFree - 0.05) {
+    if (aObs <= aSig) reason = obs.agent?.kind === 'ped' ? 'pedestrian' : 'vehicle';
+    else reason = st?.yielding ? 'yield' : st?.boxBlocked ? 'box' : 'signal';
+  }
   return { acc, reason };
 }
 
 // Should a vehicle about to turn left at `stop` wait for oncoming traffic?
 export function makeLeftTurnYield(agents, self) {
   return (st) => {
-    if (st.turn !== 'left' || st.dist > 25) return false;
+    if (st.turn !== 'left' || st.dist > 30) return false;
     const [dx, dz] = st.d;
     for (const a of agents) {
       if (a === self || a.kind !== 'car' || a.parked || !a.leg) continue;
       const l = a.leg;
       if (l.node[0] !== st.node[0] || l.node[1] !== st.node[1]) continue;
       if (l.d[0] !== -dx || l.d[1] !== -dz) continue; // not oncoming
-      if (l.stop.turn === 'left') continue; // opposing left turns don't conflict
       const toCenter = l.s1 + ROAD_W / 2 - a.s;
-      if (toCenter > -ROAD_W / 2 && toCenter < 45 && (a.v > 0.5 || toCenter < 18)) return true;
+      if (l.stop.turn === 'left') {
+        // Opposing left turns cross near the center: whoever is already in the box goes first;
+        // if both are at the line, the lower id goes first.
+        const inBox = toCenter < ROAD_W / 2 + 1 && toCenter > -ROAD_W / 2;
+        const atLine = toCenter < ROAD_W / 2 + 12 && toCenter >= ROAD_W / 2 + 1;
+        if (inBox || (atLine && st.dist < 8 && a.id < self.id)) return true;
+        continue;
+      }
+      // Gap acceptance: any oncoming car close to the box, or one arriving within ~6 s.
+      const toBox = toCenter - ROAD_W / 2;
+      if (toCenter > -ROAD_W / 2 && (toBox < 25 || toBox / Math.max(a.v, 0.1) < 6)) return true;
     }
     return false;
   };
@@ -252,7 +284,7 @@ export class Expert {
     this.signals = signals;
     this.k = 0;
     this.s = 0;
-    this.agent = { kind: 'car', x: 0, z: 0, h: 0, v: 0, halfLen: HALF_LEN, s: 0, leg: null, ego: true };
+    this.agent = { id: 0, kind: 'car', x: 0, z: 0, h: 0, v: 0, halfLen: HALF_LEN, s: 0, leg: null, ego: true };
   }
 
   // Project the car onto the route (monotonic forward search).

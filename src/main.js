@@ -13,7 +13,7 @@ import { Signals } from './signals.js';
 import { Vehicle } from './vehicle.js';
 import { Route, Expert } from './planner.js';
 import { Fleet } from './fleet.js';
-import { placeParkedCars } from './traffic.js';
+import { placeParkedCars, Traffic } from './traffic.js';
 
 const $ = (id) => document.getElementById(id);
 const DT = 1 / 60;
@@ -25,6 +25,7 @@ const settings = {
   hour: Number(params.get('hour') ?? 14.5),
   cam: params.get('cam') ?? 'chase',
   speed: 1,
+  cars: Number(params.get('cars') ?? 40),
   paused: false,
   shadows: true,
   bloom: true,
@@ -123,7 +124,7 @@ function applyTimeOfDay(hour) {
 }
 
 // ---------- world ----------
-let mats, city, signals, car, route, expert, fleet, parked;
+let mats, city, signals, car, route, expert, fleet, parked, traffic;
 
 async function init() {
   setLoading('Loading photo-scanned textures…');
@@ -143,6 +144,9 @@ async function init() {
   car = new Vehicle(p0.x, p0.z, Math.atan2(p1.z - p0.z, p1.x - p0.x));
   scene.add(car.mesh);
   expert = new Expert(route, signals);
+  expert.track(car);
+  traffic = new Traffic(fleet, signals, rand);
+  traffic.setCount(settings.cars, expert.agent);
 
   applyTimeOfDay(settings.hour);
   $('seed').textContent = seed;
@@ -211,8 +215,10 @@ let last = performance.now(), acc = 0, fpsAcc = 0, fpsN = 0, lastCtrl = null, la
 
 function step() {
   signals.update(DT);
-  const c = expert.control(car);
+  const agents = [expert.agent, ...traffic.agents];
+  const c = expert.control(car, agents);
   car.step(DT, c.steer, c.throttle);
+  traffic.step(DT, agents, expert.agent);
   lastCtrl = c;
 }
 
@@ -232,6 +238,7 @@ function frame(now) {
     lastSigT = now;
   }
   car.syncMesh(night);
+  traffic.sync();
   updateCamera(dtReal);
   if (settings.bloom) composer.render();
   else renderer.render(scene, camera);
@@ -259,6 +266,10 @@ function updateHud() {
     el.dataset.state = sig.state;
     $('signal-text').textContent = `${sig.state} · ${Math.max(0, Math.round(sig.dist))} m`;
   } else el.hidden = true;
+  const why = { vehicle: 'Following vehicle', pedestrian: 'Yielding to pedestrian', yield: 'Yielding to oncoming traffic', signal: null }[c.reason];
+  $('reason').hidden = !why;
+  if (why) $('reason').textContent = c.lead && c.reason !== 'yield' ? `${why} · ${Math.round(c.lead.gap)} m` : why;
+  $('traffic-count').textContent = traffic.cars.length;
   const h = settings.hour;
   $('clock').textContent = `${String(Math.floor(h)).padStart(2, '0')}:${String(Math.floor((h % 1) * 60)).padStart(2, '0')}`;
 }
@@ -285,6 +296,11 @@ $('hour').addEventListener('input', (e) => {
   clearTimeout(todTimer);
   todTimer = setTimeout(() => applyTimeOfDay(settings.hour), 30);
   updateHud();
+});
+$('cars').value = settings.cars;
+$('cars').addEventListener('input', (e) => {
+  settings.cars = +e.target.value;
+  traffic.setCount(settings.cars, expert.agent);
 });
 $('sim-speed').addEventListener('change', (e) => (settings.speed = +e.target.value));
 $('btn-pause').addEventListener('click', () => {
