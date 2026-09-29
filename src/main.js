@@ -14,6 +14,8 @@ import { Vehicle } from './vehicle.js';
 import { Route, Expert } from './planner.js';
 import { Fleet } from './fleet.js';
 import { placeParkedCars, Traffic } from './traffic.js';
+import { Crowd } from './peds.js';
+import { CrowdRenderer } from './pedRender.js';
 
 const $ = (id) => document.getElementById(id);
 const DT = 1 / 60;
@@ -26,6 +28,7 @@ const settings = {
   cam: params.get('cam') ?? 'chase',
   speed: 1,
   cars: Number(params.get('cars') ?? 40),
+  peds: Number(params.get('peds') ?? 70),
   paused: false,
   shadows: true,
   bloom: true,
@@ -124,7 +127,7 @@ function applyTimeOfDay(hour) {
 }
 
 // ---------- world ----------
-let mats, city, signals, car, route, expert, fleet, parked, traffic;
+let mats, city, signals, car, route, expert, fleet, parked, traffic, crowd, crowdView;
 
 async function init() {
   setLoading('Loading photo-scanned textures…');
@@ -147,6 +150,11 @@ async function init() {
   expert.track(car);
   traffic = new Traffic(fleet, signals, rand);
   traffic.setCount(settings.cars, expert.agent);
+  crowd = new Crowd(signals, rand);
+  crowd.setCount(settings.peds);
+  crowdView = new CrowdRenderer(scene, rand);
+  setLoading('Loading pedestrians…');
+  await crowdView.ready.catch((e) => console.warn('Pedestrian model failed to load', e));
 
   applyTimeOfDay(settings.hour);
   $('seed').textContent = seed;
@@ -215,10 +223,12 @@ let last = performance.now(), acc = 0, fpsAcc = 0, fpsN = 0, lastCtrl = null, la
 
 function step() {
   signals.update(DT);
-  const agents = [expert.agent, ...traffic.agents];
+  const vehicles = [expert.agent, ...traffic.agents];
+  const agents = [...vehicles, ...crowd.agents];
   const c = expert.control(car, agents);
   car.step(DT, c.steer, c.throttle);
   traffic.step(DT, agents, expert.agent);
+  crowd.step(DT, vehicles);
   lastCtrl = c;
 }
 
@@ -239,6 +249,7 @@ function frame(now) {
   }
   car.syncMesh(night);
   traffic.sync();
+  crowdView.sync(crowd.peds, settings.paused ? 0 : dtReal * settings.speed, camera);
   updateCamera(dtReal);
   if (settings.bloom) composer.render();
   else renderer.render(scene, camera);
@@ -266,10 +277,11 @@ function updateHud() {
     el.dataset.state = sig.state;
     $('signal-text').textContent = `${sig.state} · ${Math.max(0, Math.round(sig.dist))} m`;
   } else el.hidden = true;
-  const why = { vehicle: 'Following vehicle', pedestrian: 'Yielding to pedestrian', yield: 'Yielding to oncoming traffic', signal: null }[c.reason];
+  const why = { vehicle: 'Following vehicle', pedestrian: 'Yielding to pedestrian', yield: 'Yielding to oncoming traffic', box: 'Waiting for space past the intersection', signal: null }[c.reason];
   $('reason').hidden = !why;
   if (why) $('reason').textContent = c.lead && c.reason !== 'yield' ? `${why} · ${Math.round(c.lead.gap)} m` : why;
   $('traffic-count').textContent = traffic.cars.length;
+  $('ped-count').textContent = crowd.peds.length;
   const h = settings.hour;
   $('clock').textContent = `${String(Math.floor(h)).padStart(2, '0')}:${String(Math.floor((h % 1) * 60)).padStart(2, '0')}`;
 }
@@ -302,6 +314,11 @@ $('cars').addEventListener('input', (e) => {
   settings.cars = +e.target.value;
   traffic.setCount(settings.cars, expert.agent);
 });
+$('peds').value = settings.peds;
+$('peds').addEventListener('input', (e) => {
+  settings.peds = +e.target.value;
+  crowd.setCount(settings.peds);
+});
 $('sim-speed').addEventListener('change', (e) => (settings.speed = +e.target.value));
 $('btn-pause').addEventListener('click', () => {
   settings.paused = !settings.paused;
@@ -322,7 +339,7 @@ window.addEventListener('keydown', (e) => {
   if (e.key === ' ') $('btn-pause').click();
 });
 
-window.__dbg = { scene, sun, renderer, camera, cityUniforms };
+window.__dbg = { scene, sun, renderer, camera, cityUniforms, get orbit() { return orbit; }, get crowd() { return crowd; } };
 init().catch((err) => {
   console.error(err);
   setLoading(`Failed to start: ${err.message}`);

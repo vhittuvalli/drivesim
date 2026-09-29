@@ -198,7 +198,8 @@ export function pathObstacle(samples, agents, self) {
       r = 1.85;
     } else {
       pts = [[a.x, a.z]];
-      r = 1.9;
+      // Anticipate pedestrians who are on the road and moving: they may step into our lane.
+      r = a.crossing ? 3.5 : 1.9;
     }
     const r2 = r * r;
     for (const q of samples) {
