@@ -3,8 +3,10 @@
 // obstacle detection along the planned path, and IDM car-following.
 import { LANE_W, ROAD_W, PITCH, STOP_LINE, GRID, WHEELBASE, MAX_STEER, nodePos, inGrid, clamp, conditions, drag } from './config.js';
 import { Path } from './path.js';
+import { HW_CRUISE, LaneChanger, HAZARD_HANG, laneLeader } from './highway.js';
 
 export const CRUISE = 11; // m/s (~40 km/h, city speed)
+const NO_SIGNAL = { gap: Infinity, stop: null };
 export const HALF_LEN = 2.35; // center to front bumper
 const A_LAT = 2.2; // comfortable lateral accel
 const A_DEC = 2.5; // comfortable decel used for curve speed planning
@@ -145,8 +147,12 @@ export function curveSpeed(route, s, k, vmax = CRUISE) {
   const g = conditions.grip;
   let vt = Math.min(vmax, Math.sqrt(2 * A_DEC * g * Math.max(conditions.visibility - 12, 4)));
   for (let d = 0; d < 60; d += 2) {
-    const a = route.at(s + d, k), b = route.at(s + d + 4, k);
-    const kappa = Math.abs(angleWrap(b.h - a.h)) / 4;
+    let kappa;
+    if (route.curvatureAt) kappa = Math.abs(route.curvatureAt(s + d + 2, k));
+    else {
+      const a = route.at(s + d, k), b = route.at(s + d + 4, k);
+      kappa = Math.abs(angleWrap(b.h - a.h)) / 4;
+    }
     const vCurve = Math.sqrt((A_LAT * g) / Math.max(kappa, 1e-4));
     vt = Math.min(vt, Math.sqrt(vCurve * vCurve + 2 * A_DEC * g * Math.max(0, d - 2)));
   }
@@ -448,6 +454,9 @@ export class Expert {
     this.s = 0;
     this.lateral = 0;
     this.ot = new Overtaker(HALF_LEN);
+    // On the highway lane changes replace overtaking through the oncoming lane.
+    this.lc = route.highway ? new LaneChanger({ politeness: 0.25, cooldown: 3, rand: () => 0.5 }) : null;
+    this.agent.hw = null;
   }
 
   // Keep the agent in sync while someone else is driving.
@@ -473,6 +482,7 @@ export class Expert {
     // Cross-track error from the intended path (lane center, or the passing offset).
     this.lateral = -(car.x - p.x) * Math.sin(p.h) + (car.z - p.z) * Math.cos(p.h) + this.ot.offsetAt(this.s);
     Object.assign(this.agent, { x: car.x, z: car.z, h: car.h, v: car.v, s: this.s, leg: this.route.legAt(this.s) });
+    if (this.route.highway) this.agent.hw = this.route.stateAt(this.s, best, this.lateral);
   }
 
   control(car, agents = [], dt = 1 / 60) {
@@ -490,11 +500,18 @@ export class Expert {
     const ld = Math.hypot(tgt.x - car.x, tgt.z - car.z);
     const steer = clamp(Math.atan((2 * WHEELBASE * Math.sin(alpha)) / ld) / MAX_STEER, -1, 1);
 
-    const v0 = curveSpeed(r, this.s, this.k);
-    const sig = signalObstacle(r, this.s, car.v, this.signals, makeLeftTurnYield(agents, this.agent));
-    const samples = pathAhead(r, this.s, this.k, 45, 1.5, this.ot.active ? off : null);
+    const hw = r.highway;
+    const v0 = curveSpeed(r, this.s, this.k, hw ? HW_CRUISE : CRUISE);
+    const sig = hw ? NO_SIGNAL : signalObstacle(r, this.s, car.v, this.signals, makeLeftTurnYield(agents, this.agent));
+    // At highway speed look far enough ahead to stop for a standstill comfortably.
+    const samples = hw ? pathAhead(r, this.s, this.k, clamp(car.v * 4.5, 45, 140), 2) : pathAhead(r, this.s, this.k, 45, 1.5, this.ot.active ? off : null);
     let obs = pathObstacle(samples, agents, this.agent);
-    const hang = this.ot.plan({ route: r, s: this.s, k: this.k, v: car.v, v0, obs, agents, self: this.agent, dt });
+    let hang = 0;
+    if (hw) {
+      obs = laneLeader(obs, this.agent, r.lane, agents);
+      this.lc.update({ route: r, s: this.s, k: this.k, v: car.v, v0, agents, self: this.agent, dt });
+      if (obs.agent?.hazard) hang = HAZARD_HANG;
+    } else hang = this.ot.plan({ route: r, s: this.s, k: this.k, v: car.v, v0, obs, agents, self: this.agent, dt });
     if (hang && Number.isFinite(obs.gap)) obs = { ...obs, gap: Math.max(0, obs.gap - hang) };
     const cross = crossingObstacle(samples, agents, this.agent, car.v);
     if (cross.gap < obs.gap) obs = cross;
@@ -508,7 +525,7 @@ export class Expert {
     return {
       steer, throttle, acc, reason, target: tgt, signal: sig.stop, lead: Number.isFinite(obs.gap) ? obs : null,
       nextTurn: nextTurn && { kind: nextTurn.kind, dist: nextTurn.s - this.s },
-      samples, overtake: this.ot.info, route: r, s: this.s, k: this.k,
+      samples, overtake: this.ot.info, lanes: this.lc?.info ?? null, route: r, s: this.s, k: this.k,
     };
   }
 }

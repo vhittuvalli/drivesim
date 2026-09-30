@@ -17,7 +17,7 @@ export const STOP_LINE = ROAD_W / 2 + 5; // near edge of stop line (0.5 m wide)
 // Ego vehicle
 export const WHEELBASE = 2.8;
 export const MAX_STEER = 0.6;
-export const MAX_SPEED = 20;
+export const MAX_SPEED = 36; // top speed (~130 km/h); city driving stays near CRUISE
 // Aerodynamic drag and rolling resistance (m/s^2) at speed v; drivers add it to their throttle.
 export const drag = (v) => 0.0025 * v * v + (v > 0 ? 0.08 : 0);
 

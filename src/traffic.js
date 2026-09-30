@@ -2,6 +2,7 @@
 import { LANE_W, ROAD_W, PITCH, STOP_LINE, GRID, nodePos, inGrid } from './config.js';
 import { randomBodyType, randomPaint } from './bodytypes.js';
 import { Route, IDM, Overtaker, curveSpeed, signalObstacle, pathAhead, pathObstacle, longitudinal, makeLeftTurnYield } from './planner.js';
+import { HW, HW_LENGTH, HighwayRoute, LaneChanger, HAZARD_HANG, loopDist, laneLeader, aheadOnCarriageway } from './highway.js';
 
 // Parked cars fill a fraction of the marked parking stalls (see City.buildMarkings).
 export function placeParkedCars(city, fleet, rand, density = 0.3) {
@@ -37,6 +38,8 @@ export function placeParkedCars(city, fleet, rand, density = 0.3) {
 
 const MIN_SPAWN_GAP = 16; // meters to any other agent
 const EGO_SPAWN_CLEARANCE = 45;
+const HW_SPAWN_GAP = 40; // same carriageway and lane, bumper to bumper
+const HW_EGO_CLEARANCE = 90;
 const NO_SIGNAL = { gap: Infinity, stop: null };
 
 let nextId = 1;
@@ -60,6 +63,10 @@ class NpcCar {
     this.speedFactor = opts.speedFactor ?? 0.85 + rand() * 0.25;
     this.idm = { ...IDM, T: 1.0 + rand() * 0.8, a: 1.2 + rand() * 0.8 };
     this.ot = new Overtaker(handle.spec.L / 2);
+    this.hw = !!route.highway;
+    // Highway drivers: their own cruising speed, and lane changes unless scripted.
+    this.desired = opts.desired ?? (this.hw ? HW.speed * (0.85 + rand() * 0.25) : Infinity);
+    this.lc = this.hw && opts.laneChanges !== false ? new LaneChanger({ politeness: 0.1 + rand() * 0.4, keepRight: handle.type === 'van' ? 0.5 : 0.25 + rand() * 0.1, rand }) : null;
     const p = route.at(0);
     this.agent = {
       id: nextId++, kind: 'car', x: p.x, z: p.z, h: p.h, v: this.v, halfLen: handle.spec.L / 2, s: 0, leg: route.legAt(0),
@@ -76,6 +83,7 @@ class NpcCar {
       x: p.x + Math.sin(p.h) * o, z: p.z - Math.cos(p.h) * o, h: p.h - Math.atan(slope),
       v: this.v, s: this.s, leg: r.legAt(this.s),
     });
+    if (this.hw) this.agent.hw = r.stateAt(this.s, this.k);
   }
 }
 
@@ -94,8 +102,49 @@ export class Traffic {
     return this.cars.map((c) => c.agent);
   }
 
+  // Background cars in the city streets.
   get background() {
-    return this.cars.filter((c) => !c.scripted);
+    return this.cars.filter((c) => !c.scripted && !c.hw);
+  }
+
+  // Background cars on the highway.
+  get highway() {
+    return this.cars.filter((c) => !c.scripted && c.hw);
+  }
+
+  // A car on a random highway lane, clear of other traffic and of the ego.
+  spawnHighway(ego) {
+    const r = this.rand;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      const dir = r() < 0.5 ? 1 : -1, lane = Math.floor(r() * HW.lanes), q = r() * HW_LENGTH;
+      const route = new HighwayRoute({ dir, lane, q });
+      const p = route.pts[0], hw = route.stateAt(0);
+      if (ego?.hw && ego.hw.dir === dir && Math.abs(loopDist(ego.hw.q, q)) < HW_EGO_CLEARANCE) continue;
+      if (ego && Math.hypot(p.x - ego.x, p.z - ego.z) < EGO_SPAWN_CLEARANCE) continue;
+      if (this.avoid.some((a) => Math.hypot(p.x - a.x, p.z - a.z) < a.r)) continue;
+      const near = this.cars.some((c) => c.hw && c.agent.hw?.dir === dir && Math.abs(c.agent.hw.lat - hw.lat) < HW.laneW && Math.abs(loopDist(c.agent.hw.q, q)) < HW_SPAWN_GAP);
+      if (near) continue;
+      const type = randomBodyType(r);
+      const handle = this.fleet.acquire(type, randomPaint(r));
+      if (!handle) return null;
+      // Vans stand in for trucks: slower, so there's always someone to pass.
+      const car = new NpcCar(route, handle, r, type === 'van' ? { desired: HW.speed * (0.7 + r() * 0.1) } : {});
+      car.v = car.desired * 0.9;
+      car.pose();
+      this.cars.push(car);
+      return car;
+    }
+    return null;
+  }
+
+  setHighwayCount(n, ego) {
+    let hw = this.highway;
+    while (hw.length > n) {
+      this.remove(hw[hw.length - 1]);
+      hw = this.highway;
+    }
+    let guard = 0;
+    while (this.highway.length < n && guard++ < n * 3) this.spawnHighway(ego);
   }
 
   spawn(others, ego) {
@@ -149,7 +198,7 @@ export class Traffic {
 
   // Move background cars out of the given areas (they respawn elsewhere).
   clearNear(areas, ego) {
-    for (const c of this.background) {
+    for (const c of this.cars.filter((c) => !c.scripted)) {
       if (areas.some((a) => Math.hypot(c.agent.x - a.x, c.agent.z - a.z) < a.r)) this.respawn(c, ego);
     }
   }
@@ -157,7 +206,8 @@ export class Traffic {
   respawn(car, ego) {
     this.remove(car);
     this.respawns++;
-    this.spawn([...this.agents, ego], ego);
+    if (car.hw) this.spawnHighway(ego);
+    else this.spawn([...this.agents, ego], ego);
   }
 
   // Double-parked delivery vans with hazard lights, mid-block where they can be passed.
@@ -183,6 +233,10 @@ export class Traffic {
   step(dt, agents, ego) {
     this.time += dt;
     for (const c of [...this.cars]) {
+      if (c.hw) {
+        this.stepHighway(c, dt, agents, ego);
+        continue;
+      }
       const r = c.route;
       r.ensure(c.s + 150);
       if (c.k > 300) c.k -= r.trim(c.s);
@@ -212,6 +266,38 @@ export class Traffic {
       c.stuck = c.v < 0.1 && !atSignal ? c.stuck + dt : 0;
       if (c.stuck > 40 && !c.scripted) this.respawn(c, ego);
     }
+  }
+
+  // IDM along the lane (looking further ahead at speed) and MOBIL lane changes.
+  stepHighway(c, dt, agents, ego) {
+    const r = c.route;
+    r.ensure(c.s + 200);
+    if (c.k > 300) c.k -= r.trim(c.s);
+    while (c.k < r.pts.length - 2 && r.pts[c.k + 1].s <= c.s) c.k++;
+    if (c.hold) {
+      c.v = 0;
+      c.braking = false;
+      c.pose();
+      return;
+    }
+    // The road ahead changes slowly: refresh the curve speed every 0.1 s.
+    c.curveT = (c.curveT ?? 0) - dt;
+    if (c.curveT <= 0 || c.curveV === undefined) (c.curveV = curveSpeed(r, c.s, c.k, c.desired)), (c.curveT = 0.1);
+    const v0 = Math.min(c.curveV, c.vmax);
+    const hl = c.agent.halfLen;
+    const horizon = Math.min(140, Math.max(45, c.v * 4.5));
+    let obs = pathObstacle(pathAhead(r, c.s, c.k, horizon, 2, null, hl), aheadOnCarriageway(c.agent, agents, horizon), c.agent);
+    c.lc?.update({ route: r, s: c.s, k: c.k, v: c.v, v0, agents, self: c.agent, p: c.idm, dt });
+    obs = laneLeader(obs, c.agent, r.lane, agents);
+    if (obs.agent?.hazard && Number.isFinite(obs.gap)) obs = { ...obs, gap: Math.max(0, obs.gap - HAZARD_HANG) };
+    let { acc } = longitudinal(c.v, v0, NO_SIGNAL, obs, c.idm);
+    if (c.forceAcc !== null) acc = c.forceAcc;
+    c.v = Math.max(0, c.v + acc * dt);
+    c.s += c.v * dt;
+    c.braking = acc < -0.8 || c.v < 0.1;
+    c.pose();
+    c.stuck = c.v < 0.1 ? c.stuck + dt : 0;
+    if (c.stuck > 40 && !c.scripted) this.respawn(c, ego);
   }
 
   sync() {
