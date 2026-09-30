@@ -11,7 +11,7 @@
 // lane, the left and right branches are labeled with the lane changes it could start now.
 import { ROAD_W, STOP_LINE, mulberry32 } from './config.js';
 import { Route } from './planner.js';
-import { HW, HighwayRoute, changeDistance } from './highway.js';
+import { HW, HighwayRoute, changeDistance, laneOf } from './highway.js';
 
 export const WP_DIST = [2, 4, 6, 8, 11, 14, 18, 23]; // meters along the path from the car
 export const COMMANDS = ['left', 'straight', 'right'];
@@ -60,10 +60,10 @@ function branchWaypoints(pose, kind) {
   return pathWaypoints(route, 0, pose);
 }
 
-// Waypoints for changing from the highway lane the route is in to `lane`, starting now.
-function laneChangeWaypoints(route, s, k, pose, lane, v) {
+// Waypoints for changing from highway lane `from` to `lane`, starting at progress q.
+function laneChangeWaypoints(route, q, pose, from, lane, v) {
   if (lane < 0 || lane >= HW.lanes) return null;
-  const hyp = new HighwayRoute({ dir: route.dir, lane: route.lane, q: route.qAt(s, k) });
+  const hyp = new HighwayRoute({ dir: route.dir, lane: from, q });
   hyp.changeLane(0, lane, changeDistance(v));
   return pathWaypoints(hyp, 0, pose);
 }
@@ -80,11 +80,13 @@ export function makeLabels(world, exp) {
     const taken = pathWaypoints(route, s, car, null, expert.k);
     const wp = { left: null, straight: null, right: null };
     wp[cmd.kind] = taken;
+    // The lane the path is in here (route.lane is already the target once a change is planned).
+    const q = route.qAt(s, expert.k), lane = laneOf(route.latAt(q));
     if (cmd.kind === 'straight') {
-      wp.left = laneChangeWaypoints(route, s, expert.k, car, route.lane - 1, car.v);
-      wp.right = laneChangeWaypoints(route, s, expert.k, car, route.lane + 1, car.v);
+      wp.left = laneChangeWaypoints(route, q, car, lane, lane - 1, car.v);
+      wp.right = laneChangeWaypoints(route, q, car, lane, lane + 1, car.v);
     }
-    return { command: cmd.kind, cmdDist: null, wp, vTarget, overtaking: false, road: 'highway', lane: route.lane };
+    return { command: cmd.kind, cmdDist: null, wp, vTarget, overtaking: false, road: 'highway', lane };
   }
   const overtaking = !!expert.ot.active;
   const taken = pathWaypoints(route, s, car, overtaking ? expert.ot.offsetAt : null, expert.k);

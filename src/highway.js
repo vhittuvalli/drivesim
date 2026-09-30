@@ -25,7 +25,7 @@ HW.width = HW.laneEdge + HW.outerShoulder; // centerline to the guardrail
 export const HW_CRUISE = HW.speed - 1; // the ego expert's desired speed
 
 export const laneOffset = (lane) => HW.inner + HW.laneW * (lane + 0.5);
-const laneOf = (lat) => clamp(Math.round((lat - HW.inner) / HW.laneW - 0.5), 0, HW.lanes - 1);
+export const laneOf = (lat) => clamp(Math.round((lat - HW.inner) / HW.laneW - 0.5), 0, HW.lanes - 1);
 const mod = (a, n) => ((a % n) + n) % n;
 
 // ---------- centerline ----------

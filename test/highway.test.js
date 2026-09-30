@@ -80,8 +80,8 @@ test('highway labels: commands are lane changes; left/right branches move over o
     assert.ok(L.vTarget <= 34);
     if (L.command === 'straight') {
       straight++;
-      assert.equal(L.wp.left === null, r.lane === 0, 'no left branch from the left lane');
-      assert.equal(L.wp.right === null, r.lane === HW.lanes - 1, 'no right branch from the right lane');
+      assert.equal(L.wp.left === null, L.lane === 0, 'no left branch from the left lane');
+      assert.equal(L.wp.right === null, L.lane === HW.lanes - 1, 'no right branch from the right lane');
       const other = L.wp.left ?? L.wp.right;
       // Lane-change branches bend away from the lane, left positive.
       if (L.wp.left) assert.ok(L.wp.left[7][1] > L.wp.straight[7][1]);
