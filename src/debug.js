@@ -5,6 +5,8 @@
 //   yellow rings  pedestrians on the road nearby (red: the one we're stopping for)
 //   stop bar      next stop line in the signal's color
 //   lane patch    oncoming-lane check for an overtake (green clear, red blocked, blue passing)
+//   magenta       neural driver: the path it predicts for the current command (thin lines:
+//                 the other command branches)
 import * as THREE from 'three';
 import { LANE_W } from './config.js';
 
@@ -22,6 +24,7 @@ const flat = (mesh) => {
 };
 
 const SIGNAL = { red: 0xff3b30, yellow: 0xffcc00, green: 0x34c759 };
+const NN_PTS = 9; // car + 8 predicted waypoints
 
 // Lives in its own scene, drawn on top after post-processing (see render()).
 export class DebugOverlay {
@@ -52,7 +55,19 @@ export class DebugOverlay {
       const r = flat(new THREE.Mesh(ringGeo, overlay(new THREE.MeshBasicMaterial({ color: 0xffcc00 }))));
       this.rings.push(r);
     }
-    this.group.add(this.ribbon, this.target, this.lead, this.predicted, this.stopBar, this.zone, ...this.rings);
+    // Neural driver's predicted paths: the commanded branch as a ribbon, the others as lines.
+    this.nnRibbon = flat(new THREE.Mesh(new THREE.BufferGeometry(), overlay(new THREE.MeshBasicMaterial({ color: 0xff4fd8, opacity: 0.55, side: THREE.DoubleSide }))));
+    this.nnPos = new Float32Array(NN_PTS * 2 * 3);
+    this.nnRibbon.geometry.setAttribute('position', new THREE.BufferAttribute(this.nnPos, 3));
+    const nidx = [];
+    for (let k = 0; k < NN_PTS - 1; k++) nidx.push(2 * k, 2 * k + 1, 2 * k + 2, 2 * k + 1, 2 * k + 3, 2 * k + 2);
+    this.nnRibbon.geometry.setIndex(nidx);
+    this.nnAlt = [0, 1, 2].map(() => {
+      const line = flat(new THREE.Line(new THREE.BufferGeometry(), overlay(new THREE.LineBasicMaterial({ color: 0xff4fd8, opacity: 0.45 }))));
+      line.geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(NN_PTS * 3), 3));
+      return line;
+    });
+    this.group.add(this.ribbon, this.target, this.lead, this.predicted, this.stopBar, this.zone, ...this.rings, this.nnRibbon, ...this.nnAlt);
   }
 
   set visible(v) {
@@ -71,10 +86,13 @@ export class DebugOverlay {
     renderer.autoClear = auto;
   }
 
-  update(world) {
+  // neural: the NeuralDriver while it drives (or null).
+  update(world, neural = null) {
     if (!this.group.visible) return;
-    const c = world.ctrl;
+    // The planner's state, also while the expert only shadows the neural driver.
+    const c = world.ctrl?.samples ? world.ctrl : world.ctrl?.expert;
     for (const o of this.group.children) o.visible = false;
+    if (neural?.pred) this.updateNeural(world.car, neural);
     if (!c || c.manual || !c.samples) return;
     const y = 0.12;
 
@@ -127,6 +145,33 @@ export class DebugOverlay {
       this.stopBar.visible = true;
     }
 
+    this.drawOvertake(c);
+  }
+
+  updateNeural(car, neural) {
+    const p = neural.pred, y = 0.16;
+    const pts = (path) => [{ x: car.x, z: car.z }, ...path];
+    const main = pts(neural.path);
+    for (let k = 0; k < NN_PTS; k++) {
+      const a = main[Math.max(0, k - 1)], b = main[Math.min(NN_PTS - 1, k + 1)];
+      const h = Math.atan2(b.z - a.z, b.x - a.x), lx = Math.sin(h) * 0.35, lz = -Math.cos(h) * 0.35, q = main[k];
+      this.nnPos.set([q.x + lx, y, q.z + lz, q.x - lx, y, q.z - lz], k * 6);
+    }
+    this.nnRibbon.geometry.attributes.position.needsUpdate = true;
+    this.nnRibbon.geometry.computeBoundingSphere();
+    this.nnRibbon.visible = true;
+    p.paths.forEach((path, i) => {
+      const line = this.nnAlt[i];
+      if (i === p.cmdIndex) return;
+      const arr = line.geometry.attributes.position.array;
+      pts(path).forEach((q, k) => arr.set([q.x, y, q.z], k * 3));
+      line.geometry.attributes.position.needsUpdate = true;
+      line.geometry.computeBoundingSphere();
+      line.visible = true;
+    });
+  }
+
+  drawOvertake(c) {
     // Overtake check zone on the oncoming lane.
     const ot = c.overtake;
     if (ot) {

@@ -76,3 +76,44 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
   #scenario-card { max-width: 60vw; }
   #toast { top: auto; bottom: 50%; }
 }
+
+/* Neural driver panel */
+#neural-panel { width: 282px; display: flex; flex-direction: column; gap: 5px; }
+#neural-panel[hidden] { display: none; }
+.pill[data-driver="neural"] { background: #3987e5; color: #fff; }
+.pill[data-driver="safety"] { background: #ff9f0a; color: #1d1203; }
+.pip { display: flex; flex-direction: column; gap: 4px; margin-top: 2px; }
+.pip figure { margin: 0; position: relative; }
+.pip canvas { display: block; width: 256px; height: 128px; border-radius: 6px; image-rendering: pixelated; background: #000; }
+.pip figcaption { position: absolute; left: 6px; bottom: 4px; font-size: 10.5px; padding: 0 5px; border-radius: 4px; background: rgba(0, 0, 0, 0.55); }
+.chart-head { display: flex; gap: 10px; align-items: center; margin-top: 2px; }
+.chart-head > span:first-child { color: var(--muted); margin-right: auto; }
+.legend { display: inline-flex; align-items: center; gap: 4px; }
+.legend i { width: 10px; height: 3px; border-radius: 2px; }
+.legend b { font-weight: 500; min-width: 4ch; text-align: right; }
+#nn-chart { width: 256px; height: 64px; display: block; background: rgba(0, 0, 0, 0.25); border-radius: 6px; }
+.chart-foot { display: flex; justify-content: space-between; font-size: 10px; }
+#collect-status { color: #ff9f0a; font-weight: 600; margin-top: 2px; }
+#collect-status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #ff9f0a; animation: blink 1s steps(2) infinite; }
+
+/* Benchmark scorecard */
+#scorecard { width: 330px; max-height: calc(100vh - 120px); overflow: auto; text-align: left; display: flex; flex-direction: column; gap: 6px; }
+#score-close { width: 22px; height: 22px; padding: 0; border-radius: 50%; line-height: 1; }
+#scorecard table { width: 100%; border-collapse: collapse; font-size: 12px; }
+#scorecard th { text-align: left; font-weight: 500; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); padding: 2px 0; }
+#scorecard td { padding: 2px 0; border-top: 1px solid var(--line); }
+#scorecard .num { text-align: right; font-variant-numeric: tabular-nums; }
+#scorecard .pills { white-space: nowrap; text-align: right; }
+#score-summary { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border-radius: 6px; background: rgba(255, 255, 255, 0.06); }
+.res { display: inline-block; min-width: 24px; margin-left: 3px; padding: 0 4px; border-radius: 4px; text-align: center; font-weight: 600; font-size: 11px; cursor: default; }
+.res.pass { background: #34c759; color: #04140a; }
+.res.assist { background: #ffcc00; color: #1d1703; }
+.res.fail { background: #ff453a; color: #1d0503; }
+.res.run { background: rgba(255, 255, 255, 0.12); }
+
+@media (max-width: 700px) {
+  #neural-panel { width: 200px; }
+  .pip canvas, #nn-chart { width: 176px; height: 88px; }
+  #nn-chart { height: 48px; }
+  #scorecard { width: calc(100vw - 16px); max-height: 50vh; }
+}

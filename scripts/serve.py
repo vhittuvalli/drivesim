@@ -64,4 +64,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
 print(f'Serving {ROOT} on http://localhost:{port}')
-http.server.ThreadingHTTPServer(('', port), Handler).serve_forever()
+
+class Server(http.server.ThreadingHTTPServer):
+    request_queue_size = 256  # several browsers streaming frames at once
+    daemon_threads = True
+
+
+Server(('', port), Handler).serve_forever()

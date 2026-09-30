@@ -65,8 +65,9 @@ export class Collector {
   }
 
   // rgb: the ImageData already rendered for this instant. info: {weather, hour, scenario}.
+  // Returns whether a sample was taken (none while a human drives: no expert labels).
   capture(world, rgb, info) {
-    if (!this.active || world.manual || !world.expertCtrl) return;
+    if (!this.active || world.manual || !world.expertCtrl) return false;
     const n = ++this.count, id = String(n).padStart(6, '0');
     const lab = makeLabels(world, world.expertCtrl);
     const c = world.ctrl ?? world.expertCtrl;
@@ -81,6 +82,7 @@ export class Collector {
       weather: info.weather, hour: r2(info.hour), scenario: info.scenario || null,
     });
     if (this.rows.length >= FLUSH_EVERY) this.flush();
+    return true;
   }
 }
 

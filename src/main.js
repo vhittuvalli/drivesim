@@ -19,6 +19,11 @@ import { DriverInput, DRIVE_KEYS } from './input.js';
 import { DebugOverlay } from './debug.js';
 import { LOOK, HAZE, Precipitation } from './weather.js';
 import { Recorder } from './recorder.js';
+import { SensorRig, makeClassifier } from './sensor.js';
+import { Collector } from './collect.js';
+import { NeuralDriver } from './neural.js';
+import { CollectSession, Benchmark } from './sessions.js';
+import { NeuralView, renderScorecard } from './neuralview.js';
 
 const $ = (id) => document.getElementById(id);
 const DT = 1 / 60;
@@ -29,7 +34,7 @@ const rand = mulberry32(seed);
 const settings = {
   hour: Number(params.get('hour') ?? 14.5),
   cam: params.get('cam') ?? 'chase',
-  speed: 1,
+  speed: Number(params.get('speed') ?? 1),
   cars: Number(params.get('cars') ?? 40),
   peds: Number(params.get('peds') ?? 70),
   vans: Number(params.get('vans') ?? 4), // double-parked delivery vans
@@ -38,7 +43,7 @@ const settings = {
   debug: params.get('debug') === '1',
   paused: false,
   shadows: true,
-  bloom: true,
+  bloom: params.get('fx') !== '0',
 };
 
 // ---------- renderer ----------
@@ -143,6 +148,7 @@ function applyTimeOfDay(hour) {
 
 // ---------- world ----------
 let mats, city, car, fleet, world, crowdView, debugView, precip, recorder;
+let rig, collector, neural, neuralView, collectSession = null, bench = null;
 const driver = new DriverInput();
 
 async function init() {
@@ -165,6 +171,10 @@ async function init() {
   debugView = new DebugOverlay();
   precip = new Precipitation(scene);
   recorder = new Recorder(renderer, scene);
+  rig = new SensorRig(renderer, scene, { classify: makeClassifier({ mats, city, fleet, crowdGroup: crowdView.group, egoMesh: car.mesh, sky }) });
+  collector = new Collector(rig);
+  neural = new NeuralDriver();
+  neuralView = new NeuralView();
   setLoading('Loading pedestrians…');
   await crowdView.ready.catch((e) => console.warn('Pedestrian model failed to load', e));
 
@@ -175,8 +185,20 @@ async function init() {
   $('hour').value = settings.hour;
   setCam(settings.cam);
   resize();
+  $('sim-speed').value = settings.speed;
+  $('chk-bloom').checked = settings.bloom;
   setLoading(null);
   requestAnimationFrame(frame);
+  await autostart();
+}
+
+// URL-driven sessions: ?neural=1, ?collect=<frames>[&noise=0..1], ?bench=1[&trials=n].
+async function autostart() {
+  if (params.get('neural') === '1' || params.has('bench')) {
+    if (!(await setNeural(true))) return;
+  }
+  if (params.has('bench')) runBenchmark({ trials: Number(params.get('trials') ?? 2) });
+  else if (params.has('collect')) toggleCollect({ frames: Number(params.get('collect')) || Infinity, noise: Number(params.get('noise') ?? 0.5) });
 }
 
 // ---------- cameras ----------
@@ -241,10 +263,13 @@ function frame(now) {
   if (!settings.paused) {
     acc += dtReal * settings.speed;
     let n = 0;
-    while (acc >= DT && n++ < 40) {
+    // The neural driver and the collector need a camera frame at fixed sim times: stop there,
+    // render it below, and continue next frame (the neural driver also waits for its answer).
+    while (acc >= DT && n++ < 40 && !needsCamera()) {
       world.step(DT);
       acc -= DT;
     }
+    acc = Math.min(acc, 40 * DT); // don't pile up time the loop can't work off
   }
   if (now - lastSigT > 100) {
     city.setSignalColors((n, a) => world.signals.state(n, a));
@@ -255,7 +280,12 @@ function frame(now) {
   world.traffic.sync();
   crowdView.sync(world.crowd.peds, simDt, camera);
   updateCamera(dtReal);
-  debugView.update(world);
+  sensorFrame();
+  collectSession?.update();
+  bench?.update();
+  if (bench?.done && !bench.reported) benchmarkDone();
+  if (neuralView.visible) neuralView.record(world);
+  debugView.update(world, world.policy ? neural : null);
   precip.update(simDt, camera);
   if (settings.bloom) composer.render();
   else renderer.render(scene, camera);
@@ -282,7 +312,11 @@ const OT_TEXT = { passing: '⇠ Overtaking', returning: '⇢ Merging back', abor
 function updateHud() {
   $('speed').textContent = `${Math.round(car.v * 3.6)}`;
   updateScenarioCard();
-  const c = world.ctrl;
+  neuralView.update(world, neural);
+  if (bench) renderScorecard(bench, { onClose: () => bench?.done && (bench = null) });
+  updateCollectStatus();
+  // Planner state comes from the expert, also while it only shadows the neural driver.
+  const c = world.ctrl?.manual ? world.ctrl : world.expertCtrl ?? world.ctrl;
   if (!c) return;
   const turn = c.nextTurn, ot = c.overtake;
   $('maneuver').textContent = c.manual
@@ -336,6 +370,7 @@ function startScenario(id) {
   $('scenario').value = id;
   if (id) world.startScenario(id);
   else world.endScenario();
+  neural.reset(); // the car may have been moved
   seenContacts = world.contacts;
   setCam(settings.cam);
   updateHud();
@@ -397,6 +432,137 @@ function shareLink() {
   navigator.clipboard?.writeText(url).then(() => toast('Link copied'), () => prompt('Copy this link', url));
 }
 
+// ---------- learning: collection, neural driver, benchmark ----------
+
+// The app as seen by sessions.js.
+const app = {
+  get world() {
+    return world;
+  },
+  setConditions({ weather, hour, cars, peds, vans }) {
+    settings.hour = hour;
+    $('hour').value = hour;
+    setWeatherUI(weather); // also applies the time of day
+    settings.cars = cars;
+    $('cars').value = cars;
+    world.traffic.setCount(cars, world.ego);
+    settings.peds = peds;
+    $('peds').value = peds;
+    world.crowd.setCount(peds);
+    settings.vans = vans;
+    if (!world.scenario) world.setDoubleParked(vans);
+    else world.doubleParked = vans; // restored when the scenario ends
+  },
+  startScenario,
+};
+
+function needsCamera() {
+  return (world.policy && neural.waiting(world.t)) || (collectSession?.due(world.t) ?? false);
+}
+
+// Render the roof camera once for whoever needs it at this sim time.
+function sensorFrame() {
+  const wantNN = world.policy && neural.due(world.t);
+  const wantData = collectSession?.due(world.t) && !collector.backlogged;
+  if (!wantNN && !wantData) return;
+  city.setSignalColors((n, a) => world.signals.state(n, a)); // the lamps must match this instant
+  const rgb = rig.renderRGB(car);
+  if (wantNN) neural.observe(world, rgb);
+  if (wantData) collectSession.captured(collector.capture(world, rgb, { weather: settings.weather, hour: settings.hour, scenario: settings.scenario }));
+}
+
+async function setNeural(on) {
+  if (on && !neural.ready) {
+    toast('Loading the network…');
+    try {
+      const meta = await neural.load();
+      toast(`Network loaded · ${meta.frames ?? '?'} training frames${meta.init ? ' · DAgger' : ''}`);
+    } catch (e) {
+      console.error(e);
+      toast(`Can't load the network: ${e.message}`);
+      return false;
+    }
+  }
+  neural.reset();
+  neuralView.clear();
+  world.setPolicy(on ? neural : null);
+  neuralView.visible = on;
+  $('btn-neural').classList.toggle('active', on);
+  if (!on && bench && !bench.done) stopBenchmark();
+  return true;
+}
+
+async function toggleCollect(opts = {}) {
+  if (collectSession && !collectSession.done) {
+    collectSession.stop();
+    toast(`Collected ${collectSession.total} frames in ${collectSession.episode} episode(s) · data/`);
+    $('btn-collect').classList.remove('active');
+    return;
+  }
+  const ok = await fetch('/api/datasets').then((r) => r.ok, () => false);
+  if (!ok) return toast('Collecting needs the dev server (npm run dev) to write data/');
+  if (world.manual) toggleDrive();
+  if (bench && !bench.done) stopBenchmark();
+  collectSession = new CollectSession(app, collector, { seed, driver: world.policy ? 'neural' : 'expert', ...opts });
+  collectSession.start();
+  $('btn-collect').classList.add('active');
+  toast(world.policy ? 'Collecting DAgger data: the network drives, the expert labels' : 'Collecting training data in varied conditions · C to stop');
+}
+
+function updateCollectStatus() {
+  const el = $('collect-status');
+  const st = collectSession?.status;
+  el.hidden = !st || st.done;
+  if (st && collectSession.done && $('btn-collect').classList.contains('active')) {
+    $('btn-collect').classList.remove('active');
+    toast(`Collection done: ${st.total} frames`);
+  }
+  if (el.hidden) return;
+  const frames = Number.isFinite(st.frames) ? `${st.total}/${st.frames}` : `${st.total}`;
+  el.querySelector('span').textContent = `${st.error ? `UPLOAD ERROR ${st.error} · ` : ''}COLLECT ${frames} · ep ${st.episode} · ${st.weather}${st.scenario ? ` · ${st.scenario}` : ''}${st.noise ? ' · noise' : ''}`;
+}
+
+async function runBenchmark(opts = {}) {
+  if (bench && !bench.done) return stopBenchmark();
+  if (!(await setNeural(true))) return;
+  if (collectSession && !collectSession.done) toggleCollect();
+  if (world.manual) toggleDrive();
+  bench = new Benchmark(app, neural, opts);
+  bench.start();
+  settings.speed = Math.max(settings.speed, 8);
+  $('sim-speed').value = settings.speed;
+  $('btn-bench').classList.add('active');
+  toast(`Benchmark: ${bench.items.length} runs · B to stop`);
+}
+
+function stopBenchmark() {
+  bench.done = true;
+  bench.reported = true;
+  $('btn-bench').classList.remove('active');
+  startScenario('');
+  toast('Benchmark stopped');
+}
+
+function benchmarkDone() {
+  bench.reported = true;
+  $('btn-bench').classList.remove('active');
+  startScenario('');
+  const s = bench.summary;
+  console.log('Benchmark', JSON.stringify({ summary: s, results: bench.results }));
+  toast(`Benchmark: ${s.passed}/${s.scenarios} scenarios · ${s.takeovers} takeovers in ${s.driveKm.toFixed(1)} km`);
+}
+
+// Progress of automated sessions, read by scripts/headless.mjs.
+window.__status = () => {
+  if (!world) return null;
+  return {
+    seed, t: world.t, fps: $('fps').textContent, error: collector.error ?? neural.error,
+    model: neural.meta ? { trained: neural.meta.trained, frames: neural.meta.frames, init: neural.meta.init } : null,
+    collect: collectSession?.status ?? null,
+    bench: bench && { done: bench.done, progress: { index: bench.index, total: bench.items.length }, summary: bench.summary ?? null, results: bench.results },
+  };
+};
+
 // ---------- UI ----------
 
 // Settings panel can be hidden so it doesn't cover the car; remembered per browser.
@@ -455,6 +621,9 @@ $('btn-drive').addEventListener('click', toggleDrive);
 $('btn-debug').addEventListener('click', () => setDebug(!settings.debug));
 $('btn-rec').addEventListener('click', toggleRecord);
 $('btn-link').addEventListener('click', shareLink);
+$('btn-collect').addEventListener('click', () => toggleCollect());
+$('btn-neural').addEventListener('click', () => setNeural(!world.policy));
+$('btn-bench').addEventListener('click', () => runBenchmark());
 $('sim-speed').addEventListener('change', (e) => (settings.speed = +e.target.value));
 $('btn-pause').addEventListener('click', () => {
   settings.paused = !settings.paused;
@@ -481,10 +650,13 @@ window.addEventListener('keydown', (e) => {
   } else if (key === 'm') toggleDrive();
   else if (key === 'o') setDebug(!settings.debug);
   else if (key === 'r') toggleRecord();
+  else if (key === 'c') toggleCollect();
+  else if (key === 'n') setNeural(!world.policy);
+  else if (key === 'b') runBenchmark();
   else if (key === 'h') setControlsVisible($('controls').hidden);
 });
 
-window.__dbg = { scene, sun, renderer, camera, cityUniforms, get orbit() { return orbit; }, get world() { return world; } };
+window.__dbg = { scene, sun, renderer, camera, cityUniforms, get orbit() { return orbit; }, get world() { return world; }, get neural() { return neural; }, get bench() { return bench; }, get collect() { return collectSession; } };
 init().catch((err) => {
   console.error(err);
   setLoading(`Failed to start: ${err.message}`);

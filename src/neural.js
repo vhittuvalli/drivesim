@@ -1,0 +1,171 @@
+// Neural driver: runs the trained policy (models/policy.onnx, see train/) in the browser with
+// ONNX Runtime Web and plugs into World.setPolicy(). The network sees the roof camera and the
+// car's speed; the route's next turn picks the command branch (conditional imitation learning).
+//
+// Observations are taken at a fixed rate of simulation time and the simulation waits for each
+// answer (see due / waiting), so the driver behaves the same however long inference takes.
+// Between observations the predicted waypoints are held in world coordinates and followed with
+// pure pursuit; the predicted target speed sets the throttle.
+import { clamp, WHEELBASE, MAX_STEER } from './config.js';
+import { commandOf, toEgo, TARGET_HORIZON, COMMANDS } from './labels.js';
+
+const ORT_VERSION = '1.30.0';
+const ORT_DIST = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VERSION}/dist/`;
+
+// Catmull-Rom through the car position and the waypoints, a few points per segment: pure pursuit
+// on the bare waypoints (up to 5 m apart) would cut tight corners.
+function smoothPath(pts, per = 4) {
+  const P = [[0, 0], ...pts], out = [];
+  for (let i = 0; i < P.length - 1; i++) {
+    const p0 = P[Math.max(0, i - 1)], p1 = P[i], p2 = P[i + 1], p3 = P[Math.min(P.length - 1, i + 2)];
+    for (let k = 1; k <= per; k++) {
+      const t = k / per, t2 = t * t, t3 = t2 * t;
+      const f = (a, b, c, d) => 0.5 * (2 * b + (c - a) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (3 * b - a - 3 * c + d) * t3);
+      out.push([f(p0[0], p1[0], p2[0], p3[0]), f(p0[1], p1[1], p2[1], p3[1])]);
+    }
+  }
+  return out;
+}
+
+// Pure pursuit along a path (car frame: x forward, y left) plus a speed target -> controls,
+// with the same geometry and actuator limits as the expert (planner.js).
+export function followPath(pts, v, vTarget) {
+  const Ld = 4 + 0.45 * v;
+  let prev = [0, 0], tgt = null;
+  for (const p of smoothPath(pts)) {
+    if (p[0] < 0.3) continue; // passed already (the car moved since the prediction)
+    const d = Math.hypot(p[0], p[1]);
+    if (d >= Ld) {
+      // Interpolate to the point at distance Ld on this segment.
+      const d0 = Math.hypot(prev[0], prev[1]), u = clamp((Ld - d0) / (d - d0 || 1), 0, 1);
+      tgt = [prev[0] + (p[0] - prev[0]) * u, prev[1] + (p[1] - prev[1]) * u];
+      break;
+    }
+    prev = p;
+  }
+  tgt ??= prev[0] > 0.3 ? prev : [Ld, 0];
+  const alpha = Math.atan2(-tgt[1], tgt[0]); // positive: target is to the right
+  const ld = Math.max(1, Math.hypot(tgt[0], tgt[1]));
+  const steer = clamp(Math.atan((2 * WHEELBASE * Math.sin(alpha)) / ld) / MAX_STEER, -1, 1);
+  let acc = (vTarget - v) / TARGET_HORIZON;
+  // The label is clipped at 0 (labels.js), so a zero target understates hard braking at low
+  // speed (a stop in well under the horizon): brake at least this firmly.
+  if (vTarget < 0.3 && v > 0.3) acc = Math.min(acc, -Math.max(3, 2 * v));
+  acc = clamp(acc, -7.5, 3.2);
+  let throttle = acc >= 0 ? acc / 3.2 : acc / 7.5;
+  if (v < 0.5 && vTarget < 0.25) throttle = -0.5; // hold the brake instead of creeping
+  return { steer, throttle, acc, target: tgt };
+}
+
+// ImageData (RGBA, rows top to bottom) -> float32 CHW in [0, 1].
+function toTensorData(img) {
+  const n = img.width * img.height, src = img.data, out = new Float32Array(3 * n);
+  for (let i = 0; i < n; i++) {
+    out[i] = src[i * 4] / 255;
+    out[n + i] = src[i * 4 + 1] / 255;
+    out[2 * n + i] = src[i * 4 + 2] / 255;
+  }
+  return out;
+}
+
+export class NeuralDriver {
+  constructor({ hz = 10 } = {}) {
+    this.period = 1 / hz;
+    this.session = null;
+    this.meta = null;
+    this.commands = COMMANDS; // order of the network's command branches
+    this.inferMs = 0;
+    this.reset();
+  }
+
+  get ready() {
+    return !!this.session;
+  }
+
+  // Loads models/<base>.onnx and its metadata. Throws with a readable message if missing.
+  async load(base = 'models/policy') {
+    const res = await fetch(`${base}.json`);
+    if (!res.ok) throw new Error(`no trained model at ${base}.onnx (collect data, then npm run train)`);
+    this.meta = await res.json();
+    const ort = await import('onnxruntime-web');
+    ort.env.wasm.wasmPaths = ORT_DIST;
+    ort.env.wasm.numThreads = globalThis.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 1) : 1;
+    this.ort = ort;
+    this.session = await ort.InferenceSession.create(`${base}.onnx`, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
+    this.commands = this.meta.commands;
+    [, , this.inH, this.inW] = this.meta.inputs.image;
+    return this.meta;
+  }
+
+  // Forget the current prediction (after the car is teleported).
+  reset() {
+    this.pred = null; // {pose, t, cmd, wp: world-frame paths per command, vTarget[], seg, attention, image}
+    this.pending = false;
+    this.nextObs = -Infinity;
+    this.error = null;
+  }
+
+  // The simulation must not step past this time without a fresh observation.
+  waiting(t) {
+    return this.pending || t >= this.nextObs;
+  }
+
+  // An observation should be rendered and sent now.
+  due(t) {
+    return this.ready && !this.pending && t >= this.nextObs;
+  }
+
+  // Run the network on `rgb` (the roof camera at the car's current pose). Resolves when the
+  // prediction is in place; the simulation stays paused until then.
+  async observe(world, rgb) {
+    const { car, expert } = world;
+    const pose = { x: car.x, z: car.z, h: car.h }, t = world.t, v = car.v;
+    const cmd = commandOf(expert.route, expert.s).kind;
+    this.pending = true;
+    this.nextObs = t + this.period;
+    const t0 = performance.now();
+    try {
+      const { Tensor } = this.ort;
+      const out = await this.session.run({
+        image: new Tensor('float32', toTensorData(rgb), [1, 3, this.inH, this.inW]),
+        speed: new Tensor('float32', Float32Array.of(v), [1, 1]),
+      });
+      const wp = out.waypoints.data, nWp = this.meta.n_waypoints;
+      const branches = this.commands.map((_, k) => Array.from({ length: nWp }, (_, i) => [wp[(k * nWp + i) * 2], wp[(k * nWp + i) * 2 + 1]]));
+      this.setPrediction(pose, cmd, branches, Array.from(out.v_target.data), {
+        t, v, seg: out.seg.data, segDims: out.seg.dims, attention: out.attention.data, attnDims: out.attention.dims, image: rgb,
+      });
+      for (const k of Object.keys(out)) out[k].dispose?.();
+      const ms = performance.now() - t0;
+      this.inferMs = this.inferMs ? this.inferMs * 0.9 + ms * 0.1 : ms;
+    } catch (e) {
+      this.error = e.message;
+      console.error('Neural driver inference failed', e);
+    } finally {
+      this.pending = false;
+    }
+  }
+
+  // branches: per command, waypoints in the frame of `pose` (x forward, y left). They're stored
+  // in world coordinates so the path stays put as the car moves until the next observation.
+  setPrediction(pose, cmd, branches, vTarget, extra = {}) {
+    const c = Math.cos(pose.h), s = Math.sin(pose.h);
+    const paths = branches.map((pts) => pts.map(([x, y]) => ({ x: pose.x + x * c + y * s, z: pose.z + x * s - y * c })));
+    this.pred = { pose, cmd, cmdIndex: this.commands.indexOf(cmd), paths, vTarget, ...extra };
+  }
+
+  // The path the network wants to drive for the current command, in world coordinates.
+  get path() {
+    return this.pred ? this.pred.paths[this.pred.cmdIndex] : null;
+  }
+
+  // World.setPolicy() interface. Returns null (the expert drives) until there's a prediction.
+  control(world) {
+    const p = this.pred;
+    if (!p) return null;
+    const car = world.car;
+    const pts = this.path.map((q) => toEgo(car, q.x, q.z));
+    const out = followPath(pts, car.v, p.vTarget[p.cmdIndex]);
+    return { steer: out.steer, throttle: out.throttle, acc: out.acc, cmd: p.cmd, vTarget: p.vTarget[p.cmdIndex] };
+  }
+}
