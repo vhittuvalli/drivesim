@@ -296,7 +296,10 @@ function frame(now) {
   collectSession?.update();
   bench?.update();
   if (bench?.done && !bench.reported) benchmarkDone();
-  if (neuralView.visible) neuralView.record(world);
+  if (neuralView.visible) {
+    neuralView.record(world);
+    neuralView.animateWheels(world, simDt);
+  }
   debugView.update(world, world.policy ? neural : null);
   precip.update(simDt, camera);
   if (settings.bloom) composer.render();

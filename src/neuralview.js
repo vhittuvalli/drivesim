@@ -1,7 +1,9 @@
 // HUD for the neural driver: what the network sees (camera with its attention map), what it
-// segments, a live chart of its steering against the expert's, and the safety driver's tally.
+// segments, a live chart of its steering against the expert's, two steering wheels (the
+// network's and the expert's) turning side by side, and the safety driver's tally.
 // Also the benchmark scorecard.
 import { CLASSES } from './labels.js';
+import { MAX_STEER } from './config.js';
 
 // Class colors for the segmentation view (Cityscapes-like), indexed like CLASSES.
 const SEG_COLORS = {
@@ -16,6 +18,37 @@ const CHART_SECONDS = 12;
 const $ = (id) => document.getElementById(id);
 const fmtDist = (m) => (m >= 1000 ? `${(m / 1000).toFixed(2)} km` : `${Math.round(m)} m`);
 
+// Steering wheel: a sedan's ~15:1 steering ratio turns the road-wheel angle into the angle a
+// driver would turn the wheel (full lock = ±516°). Each wheel follows its driver's command at
+// the car's steering actuator rate (vehicle.js: 1.6 rad/s at the road wheels), so it moves the
+// way a real wheel would.
+const STEER_RATIO = 15;
+const WHEEL_DEG = (MAX_STEER * STEER_RATIO * 180) / Math.PI;
+const WHEEL_RATE = 1.6 / MAX_STEER; // normalized steer units per second
+
+class Wheel {
+  constructor(el) {
+    this.el = el;
+    this.turn = el.querySelector('.turn');
+    this.deg = el.querySelector('.deg');
+    this.pedal = el.querySelector('.pedal i');
+    this.steer = 0;
+  }
+
+  // target: normalized steer command (null: this driver has nothing to say), throttle in [-1, 1].
+  update(target, throttle, dt, driving) {
+    this.el.classList.toggle('idle', target === null);
+    this.el.classList.toggle('driving', driving);
+    if (target !== null) this.steer += Math.max(-WHEEL_RATE * dt, Math.min(WHEEL_RATE * dt, target - this.steer));
+    const deg = this.steer * WHEEL_DEG;
+    this.turn.setAttribute('transform', `rotate(${deg.toFixed(1)})`);
+    this.deg.textContent = target === null ? '–' : `${deg >= 0 ? '+' : '−'}${Math.abs(deg).toFixed(0)}°`;
+    const t = Math.max(-1, Math.min(1, throttle ?? 0));
+    Object.assign(this.pedal.style, t >= 0 ? { left: '50%', width: `${t * 50}%` } : { left: `${50 + t * 50}%`, width: `${-t * 50}%` });
+    return deg;
+  }
+}
+
 export class NeuralView {
   constructor() {
     this.cam = $('nn-cam').getContext('2d');
@@ -26,10 +59,23 @@ export class NeuralView {
     this.shownPred = null;
     this.camImg = null;
     this.segImg = null;
+    this.wheelNN = new Wheel($('wheel-nn'));
+    this.wheelEx = new Wheel($('wheel-ex'));
   }
 
   set visible(on) {
     $('neural-panel').hidden = !on;
+    $('wheels').hidden = !on;
+  }
+
+  // Every rendered frame (dt: simulated seconds since the last frame, 0 while paused).
+  animateWheels(world, dt) {
+    const c = world.ctrl, ex = world.expertCtrl;
+    if (!c || !ex) return;
+    const nn = c.nn ?? null;
+    const a = this.wheelNN.update(nn ? nn.steer : null, nn?.throttle, dt, c.driver === 'neural');
+    const b = this.wheelEx.update(ex.steer, ex.throttle, dt, c.driver !== 'neural');
+    $('wheel-diff').textContent = nn ? `${Math.abs(a - b).toFixed(0)}° apart` : 'network starting';
   }
 
   get visible() {
