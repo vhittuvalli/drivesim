@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mulberry32, clamp } from '../src/config.js';
 import { World } from '../src/sim.js';
-import { makeLabels, commandOf, WP_DIST, COMMANDS } from '../src/labels.js';
+import { makeLabels, commandOf, WP_DIST, COMMANDS, MAX_TARGET_SPEED } from '../src/labels.js';
 import { Car, FakeFleet } from './helpers.js';
 
 const world = (seed, opts = {}) => new World({ rand: mulberry32(seed), car: new Car(0, 0, 0), fleet: new FakeFleet(), cars: 20, peds: 30, ...opts });
@@ -21,7 +21,7 @@ test('labels: waypoints ahead of the car, all branches supervised near intersect
     assert.equal(taken.length, WP_DIST.length);
     // Close to straight ahead at the first waypoint; lateral error is the expert's tracking error.
     assert.ok(taken[0][0] > 0.5 && taken[0][0] < 3 && Math.abs(taken[0][1]) < 1.5, JSON.stringify(taken[0]));
-    assert.ok(L.vTarget >= 0 && L.vTarget <= 14);
+    assert.ok(L.vTarget >= 0 && L.vTarget <= MAX_TARGET_SPEED);
     if (L.cmdDist !== null && L.cmdDist > 30) {
       far++;
       assert.deepEqual(L.wp.left ?? taken, taken);

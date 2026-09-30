@@ -79,7 +79,7 @@ export class Collector {
       wp: Object.fromEntries(Object.entries(lab.wp).map(([k, pts]) => [k, pts && pts.map(([x, y]) => [r2(x), r2(y)])])),
       v_target: r2(lab.vTarget), acc: r2(world.expertCtrl.acc), reason: world.expertCtrl.reason ?? null, overtaking: lab.overtaking,
       steer: r2(c.steer), throttle: r2(c.throttle), driver: c.driver ?? 'expert', noise: r2(c.noise ?? 0),
-      weather: info.weather, hour: r2(info.hour), scenario: info.scenario || null,
+      weather: info.weather, hour: r2(info.hour), scenario: info.scenario || null, road: lab.road, lane: lab.lane,
     });
     if (this.rows.length >= FLUSH_EVERY) this.flush();
     return true;
