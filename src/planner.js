@@ -2,6 +2,7 @@
 // curvature-aware desired speed, signal compliance with left-turn yielding,
 // obstacle detection along the planned path, and IDM car-following.
 import { LANE_W, ROAD_W, PITCH, STOP_LINE, GRID, WHEELBASE, MAX_STEER, nodePos, inGrid, clamp, conditions } from './config.js';
+import { Path } from './path.js';
 
 export const CRUISE = 11; // m/s (~40 km/h, city speed)
 export const HALF_LEN = 2.35; // center to front bumper
@@ -20,7 +21,7 @@ function forConditions(p) {
 }
 const smooth = (u) => (u <= 0 ? 0 : u >= 1 ? 1 : u * u * (3 - 2 * u));
 
-export class Route {
+export class Route extends Path {
   // opts.start: {i, j, d, along, lateral?, merge?} places the route on the lane leaving node (i, j)
   //   in direction d, `along` meters from the node center (random placement if omitted).
   //   `lateral` starts that many meters right of the lane center (e.g. in the parking lane) and
@@ -28,12 +29,9 @@ export class Route {
   // opts.along: distance from the start node to the spawn point for random placement.
   // opts.choose(route) may return 'straight' | 'left' | 'right' to force the next turn.
   constructor(rand, opts = {}) {
+    super();
     this.rand = rand;
     this.choose = opts.choose ?? null;
-    this.pts = []; // {x, z, s}
-    this.stops = []; // {s, node, axis, d, turn, decision}
-    this.turns = []; // {s, kind}
-    this.legs = []; // straight approaches: {s0, s1, node, d, stop}
     let i, j, dx, dz, along;
     if (opts.start) {
       ({ i, j, along } = opts.start);
@@ -84,23 +82,6 @@ export class Route {
     return { route: new Route(rand, { ...opts, start: { i, j, d: [dx, dz], along } }), reason: null };
   }
 
-  get length() {
-    return this.pts[this.pts.length - 1].s;
-  }
-
-  push(x, z) {
-    const last = this.pts[this.pts.length - 1];
-    const s = last ? last.s + Math.hypot(x - last.x, z - last.z) : 0;
-    if (last && s - last.s < 1e-3) return;
-    this.pts.push({ x, z, s });
-  }
-
-  line(x1, z1, step = 1) {
-    const last = this.pts[this.pts.length - 1];
-    const n = Math.max(1, Math.ceil(Math.hypot(x1 - last.x, z1 - last.z) / step));
-    for (let k = 1; k <= n; k++) this.push(last.x + ((x1 - last.x) * k) / n, last.z + ((z1 - last.z) * k) / n);
-  }
-
   // Drive up to the entry of this.node, registering the stop line and the approach leg.
   extendStraight() {
     const s0 = this.length;
@@ -146,39 +127,6 @@ export class Route {
     this.d = choice.d;
     this.node = [i + d2x, j + d2z];
     this.extendStraight();
-  }
-
-  ensure(s) {
-    while (this.length < s) this.extend();
-  }
-
-  // Drop geometry more than `keep` meters behind s. Returns how many points were removed
-  // so callers can shift their index hints.
-  trim(s, keep = 60) {
-    let n = 0;
-    while (n < this.pts.length - 2 && this.pts[n + 1].s < s - keep) n++;
-    if (n > 0) this.pts.splice(0, n);
-    const cut = s - keep;
-    this.stops = this.stops.filter((st) => st.s > cut);
-    this.turns = this.turns.filter((t) => t.s > cut);
-    this.legs = this.legs.filter((l) => l.s1 + ROAD_W > cut);
-    return n;
-  }
-
-  // The approach leg the vehicle is on (including the intersection box after it).
-  legAt(s) {
-    for (const l of this.legs) if (s < l.s1 + ROAD_W) return l;
-    return this.legs[this.legs.length - 1];
-  }
-
-  // Point at arc length s (linear interpolation), searching from a hint index.
-  at(s, hint = 0) {
-    let k = Math.max(0, Math.min(hint, this.pts.length - 2));
-    while (k > 0 && this.pts[k].s > s) k--;
-    while (k < this.pts.length - 2 && this.pts[k + 1].s < s) k++;
-    const a = this.pts[k], b = this.pts[k + 1];
-    const u = clamp((s - a.s) / (b.s - a.s || 1), 0, 1);
-    return { x: a.x + (b.x - a.x) * u, z: a.z + (b.z - a.z) * u, k, h: Math.atan2(b.z - a.z, b.x - a.x) };
   }
 }
 
