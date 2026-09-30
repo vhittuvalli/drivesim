@@ -7,6 +7,7 @@
 // Between observations the predicted waypoints are held in world coordinates and followed with
 // pure pursuit; the predicted target speed sets the throttle.
 import { clamp, WHEELBASE, MAX_STEER } from './config.js';
+import { throttleFor } from './planner.js';
 import { commandOf, toEgo, TARGET_HORIZON, COMMANDS } from './labels.js';
 
 const ORT_VERSION = '1.30.0';
@@ -52,7 +53,7 @@ export function followPath(pts, v, vTarget) {
   // speed (a stop in well under the horizon): brake at least this firmly.
   if (vTarget < 0.3 && v > 0.3) acc = Math.min(acc, -Math.max(3, 2 * v));
   acc = clamp(acc, -7.5, 3.2);
-  let throttle = acc >= 0 ? acc / 3.2 : acc / 7.5;
+  let throttle = throttleFor(acc, v);
   if (v < 0.5 && vTarget < 0.25) throttle = -0.5; // hold the brake instead of creeping
   return { steer, throttle, acc, target: tgt };
 }

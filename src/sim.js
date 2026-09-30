@@ -8,6 +8,7 @@ import { Traffic } from './traffic.js';
 import { Crowd } from './peds.js';
 import { SCENARIOS } from './scenarios.js';
 import { SafetyDriver } from './safety.js';
+import { HW, HW_LENGTH, HighwayRoute, highwayPose, onHighway, loopDist, laneOffset, lanePoint } from './highway.js';
 
 export const WEATHER = {
   clear: { label: 'Clear', grip: 1, visibility: Infinity },
@@ -41,7 +42,8 @@ function inBox(a, px, pz, hl, hw) {
 
 export class World {
   // car: object with x, z, h, v, step(dt, steer, throttle), reset(x, z, h, v).
-  constructor({ rand, car, fleet, parked = [], cars = 40, peds = 70, doubleParked = 0 }) {
+  // highway: number of background cars on the highway loop.
+  constructor({ rand, car, fleet, parked = [], cars = 40, peds = 70, doubleParked = 0, highway = 0 }) {
     this.rand = rand;
     this.car = car;
     this.fleet = fleet;
@@ -54,6 +56,7 @@ export class World {
     this.expert.track(car);
     this.traffic = new Traffic(fleet, this.signals, rand);
     this.traffic.setCount(cars, this.expert.agent);
+    this.traffic.setHighwayCount(highway, this.expert.agent);
     this.crowd = new Crowd(this.signals, rand);
     this.crowd.setCount(peds);
     this.doubleParked = doubleParked;
@@ -78,6 +81,11 @@ export class World {
     return this.expert.agent;
   }
 
+  // 'highway' or 'city': where the ego's route is.
+  get road() {
+    return this.expert.route.highway ? 'highway' : 'city';
+  }
+
   step(dt) {
     this.t += dt;
     this.signals.update(dt);
@@ -86,6 +94,9 @@ export class World {
     let c;
     if (this.manual) {
       this.expert.observe(this.car);
+      // Highway traffic needs to know which lane a human driver is in.
+      const p = highwayPose(this.car.x, this.car.z, this.car.h);
+      this.expert.agent.hw = onHighway(p) ? { dir: p.dir, q: p.q, lat: p.lat, target: p.lane } : null;
       const cmd = this.manual.read(dt, this.car.v);
       c = { steer: cmd.steer, throttle: cmd.throttle, acc: 0, reason: null, manual: true };
     } else {
@@ -147,7 +158,8 @@ export class World {
 
   // Give control back to the expert; it needs a lane to start from.
   handBack() {
-    const { route, reason } = Route.fromPose(this.rand, this.car.x, this.car.z, this.car.h);
+    const { x, z, h, v } = this.car;
+    const { route, reason } = onHighway(highwayPose(x, z, h)) ? HighwayRoute.fromPose(x, z, h, v) : Route.fromPose(this.rand, x, z, h);
     if (!route) return { ok: false, reason };
     this.expert.setRoute(route);
     this.expert.track(this.car);
@@ -158,6 +170,12 @@ export class World {
   // Put the car (stopped) on the closest lane that roughly matches its heading, then hand back.
   snapToLane() {
     const { x, z, h } = this.car;
+    const hp = highwayPose(x, z, h);
+    if (hp.dist < HW.width + 30) {
+      this.placeEgoHighway({ dir: hp.dir, lane: hp.lane, q: hp.q });
+      this.manual = null;
+      return;
+    }
     let best = null;
     for (let i = 0; i < GRID; i++) {
       for (let j = 0; j < GRID; j++) {
@@ -191,6 +209,56 @@ export class World {
     this.expert.setRoute(route);
     this.expert.track(this.car);
     this.touching.clear();
+  }
+
+  // Put the ego on a highway lane at progress q (see highway.js).
+  placeEgoHighway({ dir = 1, lane = 1, q = 0, v = 0 }) {
+    const route = new HighwayRoute({ dir, lane, q });
+    const p0 = route.pts[0], p1 = route.pts[1];
+    this.car.reset(p0.x, p0.z, Math.atan2(p1.z - p0.z, p1.x - p0.x), v);
+    this.expert.setRoute(route);
+    this.expert.track(this.car);
+    this.touching.clear();
+  }
+
+  // Move the ego between the city streets and the highway (no-op if it's already there).
+  setRoad(road) {
+    if (road === this.road) return;
+    if (road === 'highway') {
+      // A random lane with no highway traffic close by, at cruising speed.
+      const cars = this.traffic.highway.map((c) => c.agent.hw);
+      let spot = null;
+      for (let attempt = 0; attempt < 40 && !spot; attempt++) {
+        const dir = this.rand() < 0.5 ? 1 : -1, q = this.rand() * HW_LENGTH;
+        if (!cars.some((o) => o.dir === dir && Math.abs(loopDist(q, o.q)) < 70)) spot = { dir, q };
+      }
+      spot ??= { dir: 1, q: 0 };
+      this.placeEgoHighway({ ...spot, lane: 1 + Math.floor(this.rand() * 2), v: 22 });
+    } else {
+      const route = new Route(this.rand);
+      const p0 = route.pts[0], p1 = route.pts[1];
+      this.car.reset(p0.x, p0.z, Math.atan2(p1.z - p0.z, p1.x - p0.x));
+      this.expert.setRoute(route);
+      this.expert.track(this.car);
+      this.touching.clear();
+    }
+    this.manual = null;
+  }
+
+  // Scripted car on the highway: dir, lane and progress q; opts as Traffic.spawnScripted, plus
+  // laneChanges (default off: scenarios steer their actors) and desired speed.
+  spawnHighwayCar({ dir, lane, q }, { laneChanges = false, ...opts } = {}) {
+    return this.traffic.spawnScripted(new HighwayRoute({ dir, lane, q }), { laneChanges, ...opts });
+  }
+
+  // Areas along the ego's highway carriageway from `from` to `to` meters ahead (negative: behind).
+  highwayAreas(from, to, r = 30) {
+    const { dir, q } = this.ego.hw, out = [];
+    for (let d = from; d <= to; d += r) {
+      const p = lanePoint(dir, q + d, laneOffset(1));
+      out.push({ x: p.x, z: p.z, r });
+    }
+    return out;
   }
 
   // start: {i, j, d, along, lateral?, merge?}; opts as Traffic.spawnScripted plus choose, v.

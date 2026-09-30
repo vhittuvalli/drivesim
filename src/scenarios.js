@@ -1,11 +1,13 @@
 // Scripted driving scenarios. Each one places the ego and a few scripted actors on a straight
-// stretch of the grid, triggers events as the ego approaches, and judges the outcome:
-// any contact fails, `check` returning a message passes, and running past `timeout` fails.
+// stretch of the grid (or on the highway: `road: 'highway'`), triggers events as the ego
+// approaches, and judges the outcome: any contact fails, `check` returning a message passes, and
+// running past `timeout` fails.
 //
 // A site is a start node A = (i, j) and direction d. N1 = A + d is the next intersection
 // (always interior, so cross streets exist on both sides) and N2 = A + 2d the one after.
 import { GRID, PITCH, LANE_W, nodePos } from './config.js';
 import { HALF_LEN } from './planner.js';
+import { HW, HW_LENGTH, loopDist } from './highway.js';
 
 const axisOf = (d) => (d[0] ? 'ew' : 'ns');
 const turns = (...kinds) => () => kinds.shift() ?? null;
@@ -60,6 +62,23 @@ function passed(w, run, car, margin = 6) {
   const a = car.agent, gap = egoAlong(w, run) - alongOf(run.site, a.x, a.z) - HALF_LEN - a.halfLen;
   return gap > margin && egoInLane(w, run);
 }
+
+// ---------- highway ----------
+
+// Put the ego on a random stretch of the highway and clear background traffic around it.
+function setupHighway(w, run, { lane, v }) {
+  const dir = w.rand() < 0.5 ? 1 : -1, q = w.rand() * HW_LENGTH;
+  run.hw = { dir, q };
+  w.placeEgoHighway({ dir, lane, q, v });
+  w.clearArea(w.highwayAreas(-150, 600));
+}
+
+// A scripted car `dq` meters ahead of the ego's start (center to center), same direction.
+const hwCar = (w, run, lane, dq, opts) => w.spawnHighwayCar({ dir: run.hw.dir, lane, q: run.hw.q + dq }, { v: opts.desired, ...opts });
+// Bumper-to-bumper distance from the ego to `car` ahead (negative once the ego is past it).
+const hwGap = (w, car) => loopDist(w.ego.hw.q, car.agent.hw.q) - HALF_LEN - car.agent.halfLen;
+const egoLane = (w) => Math.round((w.ego.hw.lat - HW.inner) / HW.laneW - 0.5);
+const egoInHwLane = (w) => Math.abs((w.ego.hw.lat - HW.inner) / HW.laneW - 0.5 - egoLane(w)) < 0.25;
 
 export const SCENARIOS = {
   'overtake-parked': {
@@ -227,5 +246,85 @@ export const SCENARIOS = {
       if (left < 15) return null;
       return run.flags.yielded ? 'Yielded to oncoming traffic, then turned' : 'Completed the left turn';
     },
+  },
+  'hw-cut-in': {
+    road: 'highway',
+    name: 'Highway: aggressive cut-in',
+    goal: 'A slower car swerves into your lane just ahead and brakes: keep a safe distance',
+    timeout: 40,
+    setup(w, run) {
+      setupHighway(w, run, { lane: 1, v: 27 });
+      // Someone alongside on the left, so swerving away isn't an option.
+      run.left = hwCar(w, run, 0, -4, { desired: 27, paint: 0x1f3a66 });
+      run.cutter = hwCar(w, run, 2, 40, { desired: 21, paint: 0x8a1414 });
+    },
+    update(w, run) {
+      const c = run.cutter, f = run.flags;
+      if (!f.cut && hwGap(w, c) < 14) {
+        // A 40 m swerve at 21 m/s: ~6 m/s^2 of lateral acceleration, holding speed through it.
+        f.cut = true;
+        f.cutT = run.t;
+        c.route.changeLane(c.s, 1, 40, c.k);
+        c.forceAcc = 0;
+      }
+      if (f.cut && !f.braked && run.t - f.cutT > 2) {
+        f.braked = true;
+        c.forceAcc = -4;
+      }
+      if (f.braked && c.forceAcc !== null && c.v < 13) {
+        c.forceAcc = null;
+        c.desired = 20;
+      }
+      // Closest approach while it's ahead of us in our lane.
+      if (f.cut && Math.abs(w.ego.hw.lat - c.agent.hw.lat) < 2 && hwGap(w, c) > -1) f.minGap = Math.min(f.minGap ?? Infinity, hwGap(w, c));
+    },
+    check(w, run) {
+      const f = run.flags;
+      if (!f.cut || run.t - f.cutT < 10) return null;
+      return Number.isFinite(f.minGap) ? `Kept ${f.minGap.toFixed(1)} m from the car that cut in` : 'Avoided the car that cut in';
+    },
+  },
+
+  'hw-stalled': {
+    road: 'highway',
+    name: 'Highway: stalled car in the lane',
+    goal: 'A broken-down car blocks the right lane: find a gap in the traffic beside you and move over',
+    timeout: 60,
+    setup(w, run) {
+      setupHighway(w, run, { lane: 2, v: 27 });
+      run.stalled = hwCar(w, run, 2, 280, { desired: 0, hold: true, hazard: true, paint: 0x4a4f55 });
+      // Traffic in the middle lane the ego has to merge into.
+      for (const dq of [-55, 25, 75]) hwCar(w, run, 1, dq, { desired: 24 });
+    },
+    check: (w, run) => (hwGap(w, run.stalled) < -2 * HALF_LEN - 8 && egoInHwLane(w) ? 'Changed lanes and passed the stalled car' : null),
+  },
+
+  'hw-jam': {
+    road: 'highway',
+    name: 'Highway: sudden traffic jam',
+    goal: 'Traffic ahead brakes hard to a standstill in every lane: stop in time, then move off with it',
+    timeout: 50,
+    setup(w, run) {
+      setupHighway(w, run, { lane: 1, v: 29 });
+      run.jam = [];
+      for (const [lane, dq] of [[0, 62], [1, 56], [2, 66], [0, 100], [1, 94], [2, 104]]) {
+        run.jam.push(hwCar(w, run, lane, dq, { desired: 26, paint: 0x8f9499 }));
+      }
+    },
+    update(w, run) {
+      const f = run.flags;
+      if (!f.brake && run.t > 4) {
+        f.brake = run.t;
+        for (const c of run.jam) c.forceAcc = -6.5;
+      }
+      for (const c of run.jam) if (c.forceAcc !== null && c.v === 0) c.forceAcc = 0;
+      if (f.brake && !f.stopped && run.jam.every((c) => c.v === 0)) f.stopped = run.t;
+      if (f.stopped && !f.release && run.t - f.stopped > 5) {
+        f.release = run.t;
+        for (const c of run.jam) c.forceAcc = null;
+      }
+      if (f.brake) f.minV = Math.min(f.minV ?? Infinity, w.car.v);
+    },
+    check: (w, run) => (run.flags.release && run.flags.minV < 3 && w.car.v > 15 ? 'Stopped for the jam and moved off with the traffic' : null),
   },
 };

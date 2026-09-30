@@ -1,9 +1,12 @@
 // Routes on the street grid plus the driving logic shared by every vehicle:
 // curvature-aware desired speed, signal compliance with left-turn yielding,
 // obstacle detection along the planned path, and IDM car-following.
-import { LANE_W, ROAD_W, PITCH, STOP_LINE, GRID, WHEELBASE, MAX_STEER, nodePos, inGrid, clamp, conditions } from './config.js';
+import { LANE_W, ROAD_W, PITCH, STOP_LINE, GRID, WHEELBASE, MAX_STEER, nodePos, inGrid, clamp, conditions, drag } from './config.js';
+import { Path } from './path.js';
+import { HW_CRUISE, LaneChanger, HAZARD_HANG, laneLeader } from './highway.js';
 
 export const CRUISE = 11; // m/s (~40 km/h, city speed)
+const NO_SIGNAL = { gap: Infinity, stop: null };
 export const HALF_LEN = 2.35; // center to front bumper
 const A_LAT = 2.2; // comfortable lateral accel
 const A_DEC = 2.5; // comfortable decel used for curve speed planning
@@ -20,7 +23,14 @@ function forConditions(p) {
 }
 const smooth = (u) => (u <= 0 ? 0 : u >= 1 ? 1 : u * u * (3 - 2 * u));
 
-export class Route {
+// Throttle (> 0) or brake (< 0) command for a net acceleration at speed v, overcoming drag
+// (see Vehicle.step: full throttle is 3.2 m/s^2, full brake 7.5 m/s^2).
+export function throttleFor(acc, v) {
+  const a = acc + drag(v);
+  return a >= 0 ? a / 3.2 : a / 7.5;
+}
+
+export class Route extends Path {
   // opts.start: {i, j, d, along, lateral?, merge?} places the route on the lane leaving node (i, j)
   //   in direction d, `along` meters from the node center (random placement if omitted).
   //   `lateral` starts that many meters right of the lane center (e.g. in the parking lane) and
@@ -28,12 +38,9 @@ export class Route {
   // opts.along: distance from the start node to the spawn point for random placement.
   // opts.choose(route) may return 'straight' | 'left' | 'right' to force the next turn.
   constructor(rand, opts = {}) {
+    super();
     this.rand = rand;
     this.choose = opts.choose ?? null;
-    this.pts = []; // {x, z, s}
-    this.stops = []; // {s, node, axis, d, turn, decision}
-    this.turns = []; // {s, kind}
-    this.legs = []; // straight approaches: {s0, s1, node, d, stop}
     let i, j, dx, dz, along;
     if (opts.start) {
       ({ i, j, along } = opts.start);
@@ -84,23 +91,6 @@ export class Route {
     return { route: new Route(rand, { ...opts, start: { i, j, d: [dx, dz], along } }), reason: null };
   }
 
-  get length() {
-    return this.pts[this.pts.length - 1].s;
-  }
-
-  push(x, z) {
-    const last = this.pts[this.pts.length - 1];
-    const s = last ? last.s + Math.hypot(x - last.x, z - last.z) : 0;
-    if (last && s - last.s < 1e-3) return;
-    this.pts.push({ x, z, s });
-  }
-
-  line(x1, z1, step = 1) {
-    const last = this.pts[this.pts.length - 1];
-    const n = Math.max(1, Math.ceil(Math.hypot(x1 - last.x, z1 - last.z) / step));
-    for (let k = 1; k <= n; k++) this.push(last.x + ((x1 - last.x) * k) / n, last.z + ((z1 - last.z) * k) / n);
-  }
-
   // Drive up to the entry of this.node, registering the stop line and the approach leg.
   extendStraight() {
     const s0 = this.length;
@@ -147,39 +137,6 @@ export class Route {
     this.node = [i + d2x, j + d2z];
     this.extendStraight();
   }
-
-  ensure(s) {
-    while (this.length < s) this.extend();
-  }
-
-  // Drop geometry more than `keep` meters behind s. Returns how many points were removed
-  // so callers can shift their index hints.
-  trim(s, keep = 60) {
-    let n = 0;
-    while (n < this.pts.length - 2 && this.pts[n + 1].s < s - keep) n++;
-    if (n > 0) this.pts.splice(0, n);
-    const cut = s - keep;
-    this.stops = this.stops.filter((st) => st.s > cut);
-    this.turns = this.turns.filter((t) => t.s > cut);
-    this.legs = this.legs.filter((l) => l.s1 + ROAD_W > cut);
-    return n;
-  }
-
-  // The approach leg the vehicle is on (including the intersection box after it).
-  legAt(s) {
-    for (const l of this.legs) if (s < l.s1 + ROAD_W) return l;
-    return this.legs[this.legs.length - 1];
-  }
-
-  // Point at arc length s (linear interpolation), searching from a hint index.
-  at(s, hint = 0) {
-    let k = Math.max(0, Math.min(hint, this.pts.length - 2));
-    while (k > 0 && this.pts[k].s > s) k--;
-    while (k < this.pts.length - 2 && this.pts[k + 1].s < s) k++;
-    const a = this.pts[k], b = this.pts[k + 1];
-    const u = clamp((s - a.s) / (b.s - a.s || 1), 0, 1);
-    return { x: a.x + (b.x - a.x) * u, z: a.z + (b.z - a.z) * u, k, h: Math.atan2(b.z - a.z, b.x - a.x) };
-  }
 }
 
 // ---------- shared driving logic ----------
@@ -190,8 +147,12 @@ export function curveSpeed(route, s, k, vmax = CRUISE) {
   const g = conditions.grip;
   let vt = Math.min(vmax, Math.sqrt(2 * A_DEC * g * Math.max(conditions.visibility - 12, 4)));
   for (let d = 0; d < 60; d += 2) {
-    const a = route.at(s + d, k), b = route.at(s + d + 4, k);
-    const kappa = Math.abs(angleWrap(b.h - a.h)) / 4;
+    let kappa;
+    if (route.curvatureAt) kappa = Math.abs(route.curvatureAt(s + d + 2, k));
+    else {
+      const a = route.at(s + d, k), b = route.at(s + d + 4, k);
+      kappa = Math.abs(angleWrap(b.h - a.h)) / 4;
+    }
     const vCurve = Math.sqrt((A_LAT * g) / Math.max(kappa, 1e-4));
     vt = Math.min(vt, Math.sqrt(vCurve * vCurve + 2 * A_DEC * g * Math.max(0, d - 2)));
   }
@@ -493,6 +454,9 @@ export class Expert {
     this.s = 0;
     this.lateral = 0;
     this.ot = new Overtaker(HALF_LEN);
+    // On the highway lane changes replace overtaking through the oncoming lane.
+    this.lc = route.highway ? new LaneChanger({ politeness: 0.25, cooldown: 3, rand: () => 0.5 }) : null;
+    this.agent.hw = null;
   }
 
   // Keep the agent in sync while someone else is driving.
@@ -518,6 +482,7 @@ export class Expert {
     // Cross-track error from the intended path (lane center, or the passing offset).
     this.lateral = -(car.x - p.x) * Math.sin(p.h) + (car.z - p.z) * Math.cos(p.h) + this.ot.offsetAt(this.s);
     Object.assign(this.agent, { x: car.x, z: car.z, h: car.h, v: car.v, s: this.s, leg: this.route.legAt(this.s) });
+    if (this.route.highway) this.agent.hw = this.route.stateAt(this.s, best, this.lateral);
   }
 
   control(car, agents = [], dt = 1 / 60) {
@@ -535,25 +500,32 @@ export class Expert {
     const ld = Math.hypot(tgt.x - car.x, tgt.z - car.z);
     const steer = clamp(Math.atan((2 * WHEELBASE * Math.sin(alpha)) / ld) / MAX_STEER, -1, 1);
 
-    const v0 = curveSpeed(r, this.s, this.k);
-    const sig = signalObstacle(r, this.s, car.v, this.signals, makeLeftTurnYield(agents, this.agent));
-    const samples = pathAhead(r, this.s, this.k, 45, 1.5, this.ot.active ? off : null);
+    const hw = r.highway;
+    const v0 = curveSpeed(r, this.s, this.k, hw ? HW_CRUISE : CRUISE);
+    const sig = hw ? NO_SIGNAL : signalObstacle(r, this.s, car.v, this.signals, makeLeftTurnYield(agents, this.agent));
+    // At highway speed look far enough ahead to stop for a standstill comfortably.
+    const samples = hw ? pathAhead(r, this.s, this.k, clamp(car.v * 4.5, 45, 140), 2) : pathAhead(r, this.s, this.k, 45, 1.5, this.ot.active ? off : null);
     let obs = pathObstacle(samples, agents, this.agent);
-    const hang = this.ot.plan({ route: r, s: this.s, k: this.k, v: car.v, v0, obs, agents, self: this.agent, dt });
+    let hang = 0;
+    if (hw) {
+      obs = laneLeader(obs, this.agent, r.lane, agents);
+      this.lc.update({ route: r, s: this.s, k: this.k, v: car.v, v0, agents, self: this.agent, dt });
+      if (obs.agent?.hazard) hang = HAZARD_HANG;
+    } else hang = this.ot.plan({ route: r, s: this.s, k: this.k, v: car.v, v0, obs, agents, self: this.agent, dt });
     if (hang && Number.isFinite(obs.gap)) obs = { ...obs, gap: Math.max(0, obs.gap - hang) };
     const cross = crossingObstacle(samples, agents, this.agent, car.v);
     if (cross.gap < obs.gap) obs = cross;
     let { acc, reason } = longitudinal(car.v, v0, sig, obs);
     if (reason === 'vehicle' && this.ot.info?.state === 'waiting' && obs.agent === this.ot.info.lead) reason = 'overtake-wait';
     // Hold the brake when stopped so the car doesn't creep.
-    let throttle = acc >= 0 ? acc / 3.2 : acc / 7.5;
+    let throttle = throttleFor(acc, car.v);
     if (car.v < 0.3 && acc < 0.2) throttle = -0.5;
 
     const nextTurn = r.turns.find((t) => t.s > this.s - 5);
     return {
       steer, throttle, acc, reason, target: tgt, signal: sig.stop, lead: Number.isFinite(obs.gap) ? obs : null,
       nextTurn: nextTurn && { kind: nextTurn.kind, dist: nextTurn.s - this.s },
-      samples, overtake: this.ot.info, route: r, s: this.s, k: this.k,
+      samples, overtake: this.ot.info, lanes: this.lc?.info ?? null, route: r, s: this.s, k: this.k,
     };
   }
 }

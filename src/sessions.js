@@ -1,15 +1,15 @@
 // Automated sessions driven from the app's frame loop.
 //
 // CollectSession: drives on its own and streams training data through a Collector, one run
-// (data/<run>/) per episode. Each episode randomizes weather, time of day, traffic, pedestrians
-// and double-parked vans, sometimes plays a scripted scenario, and sometimes perturbs the
+// (data/<run>/) per episode. Each episode randomizes the road (city streets or highway), weather,
+// time of day, traffic, pedestrians and double-parked vans, sometimes plays a scripted scenario, and sometimes perturbs the
 // steering so the data shows recoveries. If the neural driver is on, the expert only labels:
 // that's a DAgger round.
 //
 // Benchmark: runs the neural driver (with the safety driver) through every scenario and a
 // set of free drives in different conditions, and scores it.
 //
-// Both talk to the app through `app`: {world, setConditions({weather, hour, cars, peds, vans}),
+// Both talk to the app through `app`: {world, setConditions({road, weather, hour, cars, peds, vans, hwCars}),
 // startScenario(id | '')}.
 import { SCENARIOS } from './scenarios.js';
 import { makeSteerNoise } from './collect.js';
@@ -24,11 +24,13 @@ const stamp = () => new Date().toISOString().slice(0, 19).replace(/[-:]/g, '').r
 export function randomConditions(rand) {
   const night = rand() < 0.22;
   return {
+    road: rand() < 0.3 ? 'highway' : 'city',
     weather: weighted(rand, { clear: 0.4, rain: 0.25, fog: 0.15, snow: 0.2 }),
     hour: night ? pick(rand, [4.5 + rand() * 1.5, 19 + rand() * 3]) : 7 + rand() * 11,
     cars: Math.round(10 + rand() * 80),
     peds: Math.round(20 + rand() * 130),
     vans: Math.floor(rand() * 8),
+    hwCars: Math.round(20 + rand() * 80),
   };
 }
 
@@ -56,7 +58,8 @@ export class CollectSession {
     this.collector.stop();
     this.cond = randomConditions(rand);
     this.app.setConditions(this.cond);
-    this.scenario = rand() < this.scenarios ? pick(rand, Object.keys(SCENARIOS)) : '';
+    const onRoad = Object.keys(SCENARIOS).filter((id) => (SCENARIOS[id].road ?? 'city') === this.cond.road);
+    this.scenario = rand() < this.scenarios ? pick(rand, onRoad) : '';
     this.app.startScenario(this.scenario);
     const noisy = rand() < this.noise;
     world.steerNoise = noisy ? makeSteerNoise(rand) : null;
@@ -111,17 +114,19 @@ export const BENCH_DRIVES = [
   { label: 'Rain · dusk', weather: 'rain', hour: 18 },
   { label: 'Fog · morning', weather: 'fog', hour: 9 },
   { label: 'Snow · day', weather: 'snow', hour: 12 },
+  { label: 'Highway · day', road: 'highway', weather: 'clear', hour: 13 },
+  { label: 'Highway · rain, night', road: 'highway', weather: 'rain', hour: 21 },
 ];
 
 export class Benchmark {
-  constructor(app, neural, { trials = 2, driveSeconds = 90, cars = 40, peds = 70, vans = 4 } = {}) {
+  constructor(app, neural, { trials = 2, driveSeconds = 90, cars = 40, peds = 70, vans = 4, hwCars = 60 } = {}) {
     Object.assign(this, { app, neural, driveSeconds });
-    const traffic = { cars, peds, vans };
+    const traffic = { cars, peds, vans, hwCars };
     this.items = [];
     for (const id of Object.keys(SCENARIOS)) {
       for (let k = 0; k < trials; k++) this.items.push({ kind: 'scenario', id, name: SCENARIOS[id].name, trial: k + 1, cond: { weather: 'clear', hour: 14, ...traffic } });
     }
-    for (const d of BENCH_DRIVES) this.items.push({ kind: 'drive', id: d.label, name: d.label, cond: { weather: d.weather, hour: d.hour, ...traffic } });
+    for (const d of BENCH_DRIVES) this.items.push({ kind: 'drive', id: d.label, name: d.label, cond: { road: d.road ?? 'city', weather: d.weather, hour: d.hour, ...traffic } });
     this.results = [];
     this.index = -1;
     this.done = false;
@@ -173,7 +178,7 @@ export class Benchmark {
     if (!finished) return;
     const events = w.safety.events.slice(m.events);
     this.results.push({
-      kind: item.kind, id: item.id, name: item.name, trial: item.trial ?? null, weather: item.cond.weather, hour: item.cond.hour, ...extra,
+      kind: item.kind, id: item.id, name: item.name, trial: item.trial ?? null, road: item.kind === 'scenario' ? (SCENARIOS[item.id].road ?? 'city') : item.cond.road, weather: item.cond.weather, hour: item.cond.hour, ...extra,
       takeovers: events.length, reasons: events.map((e) => e.reason),
       autoDist: w.safety.autoDist - m.auto, dist: w.safety.totalDist - m.total,
       contacts: item.kind === 'scenario' ? w.contacts : w.contacts - m.contacts,

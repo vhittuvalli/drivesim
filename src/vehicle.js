@@ -1,7 +1,7 @@
 // Ego vehicle: kinematic bicycle model + a procedurally modeled sedan with an AV sensor rig.
 // Physics heading h: forward = (cos h, sin h) in (x, z). Positive steer turns right.
 import * as THREE from 'three';
-import { clamp, conditions, WHEELBASE, MAX_STEER, MAX_SPEED } from './config.js';
+import { clamp, conditions, WHEELBASE, MAX_STEER, MAX_SPEED, drag } from './config.js';
 const WHEEL_R = 0.34;
 
 export class Vehicle {
@@ -22,8 +22,7 @@ export class Vehicle {
     this.steer += clamp(target - this.steer, -maxRate, maxRate);
     const t = clamp(throttleCmd, -1, 1);
     this.accel = t >= 0 ? 3.2 * t * Math.min(1, conditions.grip * 1.3) : 7.5 * t * conditions.grip;
-    const drag = 0.0025 * this.v * this.v + (this.v > 0 ? 0.08 : 0);
-    this.v = clamp(this.v + (this.accel - drag) * dt, 0, MAX_SPEED);
+    this.v = clamp(this.v + (this.accel - drag(this.v)) * dt, 0, MAX_SPEED);
     this.h += (this.v / WHEELBASE) * Math.tan(this.steer) * dt;
     this.x += this.v * Math.cos(this.h) * dt;
     this.z += this.v * Math.sin(this.h) * dt;
