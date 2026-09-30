@@ -25,7 +25,7 @@ HW.width = HW.laneEdge + HW.outerShoulder; // centerline to the guardrail
 export const HW_CRUISE = HW.speed - 1; // the ego expert's desired speed
 
 export const laneOffset = (lane) => HW.inner + HW.laneW * (lane + 0.5);
-const laneOf = (lat) => clamp(Math.round((lat - HW.inner) / HW.laneW - 0.5), 0, HW.lanes - 1);
+export const laneOf = (lat) => clamp(Math.round((lat - HW.inner) / HW.laneW - 0.5), 0, HW.lanes - 1);
 const mod = (a, n) => ((a % n) + n) % n;
 
 // ---------- centerline ----------
@@ -242,7 +242,8 @@ export class HighwayRoute extends Path {
 // change lanes if our IDM acceleration improves by more than a threshold plus a politeness-
 // weighted share of what the change costs the followers, and the new follower wouldn't have to
 // brake harder than bSafe. A keep-right bias above the threshold moves drivers back out of the
-// passing lanes when the right lane is as good ("keep right except to pass").
+// passing lanes when the right lane is as good ("keep right except to pass"). preferLane moves
+// that bias to another lane (data collection uses it so the expert spends time in every lane).
 
 // Is the vehicle in (or moving into) `lane`?
 function occupies(hw, lane) {
@@ -293,6 +294,7 @@ export class LaneChanger {
     Object.assign(this, { politeness, threshold, keepRight, bSafe, cooldown });
     this.wait = rand() * 0.5; // staggers decisions across drivers
     this.cool = 1;
+    this.preferLane = null; // lane the bias pulls toward (null: the right lane)
     this.info = null; // {lane, changing: 'left' | 'right' | null, why}
   }
 
@@ -329,9 +331,10 @@ export class LaneChanger {
         const before = accel(n.fol.v, HW.speed, n.lead && { gap: n.fol.gap + 2 * self.halfLen + n.lead.gap, v: n.lead.v }, IDM);
         newFol = after - before;
       }
-      const gain = aNew - aCur + this.politeness * (newFol + oldFol) + (to > lane ? this.keepRight : -this.keepRight);
+      const target = this.preferLane ?? HW.lanes - 1, toward = Math.abs(to - target) < Math.abs(lane - target);
+      const gain = aNew - aCur + this.politeness * (newFol + oldFol) + (toward ? this.keepRight : -this.keepRight);
       if (gain > this.threshold && (!best || gain > best.gain)) {
-        const why = blocked ? 'blocked lane' : to < lane ? 'passing' : 'keeping right';
+        const why = blocked ? 'blocked lane' : !toward ? 'passing' : this.preferLane === null ? 'keeping right' : 'lane choice';
         best = { to, gain, why };
       }
     }

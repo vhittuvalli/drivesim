@@ -21,10 +21,11 @@ const weighted = (rand, table) => {
 };
 const stamp = () => new Date().toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '-');
 
-export function randomConditions(rand) {
+// highway: share of episodes on the highway.
+export function randomConditions(rand, highway = 0.3) {
   const night = rand() < 0.22;
   return {
-    road: rand() < 0.3 ? 'highway' : 'city',
+    road: rand() < highway ? 'highway' : 'city',
     weather: weighted(rand, { clear: 0.4, rain: 0.25, fog: 0.15, snow: 0.2 }),
     hour: night ? pick(rand, [4.5 + rand() * 1.5, 19 + rand() * 3]) : 7 + rand() * 11,
     cars: Math.round(10 + rand() * 80),
@@ -36,9 +37,10 @@ export function randomConditions(rand) {
 
 export class CollectSession {
   // frames: stop after this many (Infinity: until stopped). noise: share of episodes with
-  // steering noise. scenarios: share of episodes that play a scripted scenario.
-  constructor(app, collector, { seed, frames = Infinity, hz = 10, episodeSeconds = 75, noise = 0.5, scenarios = 0.35, rand = Math.random, driver = 'expert' } = {}) {
-    Object.assign(this, { app, collector, seed, frames, hz, episodeSeconds, noise, scenarios, rand, driver });
+  // steering noise. scenarios: share of episodes that play a scripted scenario. highway: share of
+  // episodes on the highway.
+  constructor(app, collector, { seed, frames = Infinity, hz = 10, episodeSeconds = 75, noise = 0.5, scenarios = 0.35, highway = 0.3, rand = Math.random, driver = 'expert' } = {}) {
+    Object.assign(this, { app, collector, seed, frames, hz, episodeSeconds, noise, scenarios, highway, rand, driver });
     this.total = 0;
     this.episode = 0;
     this.done = false;
@@ -56,7 +58,8 @@ export class CollectSession {
   nextEpisode() {
     const { world, rand } = this;
     this.collector.stop();
-    this.cond = randomConditions(rand);
+    this.cond = randomConditions(rand, this.highway);
+    this.nextLane = 0; // when to pick a new preferred highway lane
     this.app.setConditions(this.cond);
     const onRoad = Object.keys(SCENARIOS).filter((id) => (SCENARIOS[id].road ?? 'city') === this.cond.road);
     this.scenario = rand() < this.scenarios ? pick(rand, onRoad) : '';
@@ -88,6 +91,12 @@ export class CollectSession {
     const w = this.world;
     if (this.total >= this.frames) return this.stop();
     const run = w.scenario;
+    // On the highway every 15-40 s the expert prefers a new lane (or keeping right), so the data
+    // covers every lane and plenty of lane changes, not just cruising in the right lane.
+    if (!this.scenario && w.road === 'highway' && w.expert.lc && w.t >= this.nextLane) {
+      w.expert.lc.preferLane = this.rand() < 0.25 ? null : Math.floor(this.rand() * 3);
+      this.nextLane = w.t + 15 + this.rand() * 25;
+    }
     if (this.scenario) {
       // Keep recording a couple of seconds past the outcome, then move on.
       if (!run || run.status !== 'running') this.ended ??= w.t;

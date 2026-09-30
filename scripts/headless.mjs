@@ -3,6 +3,7 @@
 //
 //   node scripts/headless.mjs collect --seeds 11,12,13 --frames 5000                 expert data
 //   node scripts/headless.mjs collect --seeds 21,22 --frames 4000 --neural --noise 0  DAgger
+//   node scripts/headless.mjs collect --seeds 31,32 --frames 4000 --highway 0.8       mostly highway
 //   node scripts/headless.mjs bench --seed 1 --out models/bench.json
 //
 // Each seed (city) gets its own browser; --parallel of them run at once.
@@ -25,6 +26,7 @@ const { positionals, values: opt } = parseArgs({
     seeds: { type: 'string', default: '1,2,3' },
     frames: { type: 'string', default: '5000' },
     noise: { type: 'string', default: '0.5' },
+    highway: { type: 'string', default: '0.3' }, // share of collection episodes on the highway
     neural: { type: 'boolean', default: false },
     parallel: { type: 'string', default: '3' },
     seed: { type: 'string', default: '1' },
@@ -79,7 +81,7 @@ async function collect() {
     return `${c.total ?? 0}/${c.frames} frames · episode ${c.episode} · ${st.fps}${st.error ? ` · ERROR ${st.error}` : ''}`;
   };
   const one = async (seed) => {
-    const q = `seed=${seed}&collect=${opt.frames}&noise=${opt.noise}&speed=8&fx=0${opt.neural ? '&neural=1' : ''}`;
+    const q = `seed=${seed}&collect=${opt.frames}&noise=${opt.noise}&hwshare=${opt.highway}&speed=8&fx=0${opt.neural ? '&neural=1' : ''}`;
     const b = await open(q);
     try {
       const st = await watch(b, (s) => s.collect?.done, describe);

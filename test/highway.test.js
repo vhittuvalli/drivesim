@@ -80,8 +80,8 @@ test('highway labels: commands are lane changes; left/right branches move over o
     assert.ok(L.vTarget <= 34);
     if (L.command === 'straight') {
       straight++;
-      assert.equal(L.wp.left === null, r.lane === 0, 'no left branch from the left lane');
-      assert.equal(L.wp.right === null, r.lane === HW.lanes - 1, 'no right branch from the right lane');
+      assert.equal(L.wp.left === null, L.lane === 0, 'no left branch from the left lane');
+      assert.equal(L.wp.right === null, L.lane === HW.lanes - 1, 'no right branch from the right lane');
       const other = L.wp.left ?? L.wp.right;
       // Lane-change branches bend away from the lane, left positive.
       if (L.wp.left) assert.ok(L.wp.left[7][1] > L.wp.straight[7][1]);
@@ -128,4 +128,19 @@ test('highway safety driver: a perfect policy is never disengaged, a drifting on
     else assert.equal(w.safety.disengagements, 0, `${name}: ${JSON.stringify(w.safety.events[0])}`);
     assert.equal(w.contacts, 0, name);
   }
+});
+
+test('highway: a preferred lane moves the expert there, and back right without one', () => {
+  const w = world(7, 20);
+  w.placeEgoHighway({ dir: 1, lane: 2, q: 100, v: 26 });
+  w.clearArea(w.highwayAreas(-100, 400));
+  const lanes = new Set([w.expert.route.lane]);
+  w.expert.lc.preferLane = 0;
+  for (let t = 0; t < 40 * 60 && w.expert.route.lane !== 0; t++) w.step(1 / 60), lanes.add(w.expert.route.lane);
+  assert.equal(w.expert.route.lane, 0, 'reached the preferred left lane');
+  assert.deepEqual([...lanes].sort(), [0, 1, 2], 'one lane at a time');
+  w.expert.lc.preferLane = null;
+  for (let t = 0; t < 40 * 60 && w.expert.route.lane !== 2; t++) w.step(1 / 60);
+  assert.equal(w.expert.route.lane, 2, 'kept right again');
+  assert.equal(w.contacts, 0);
 });

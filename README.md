@@ -109,9 +109,12 @@ them, each one's brake / throttle, and a glow on whichever is in control. With t
 
 **Collect** (`C`, or `?collect=<frames>`) drives on its own and streams frames, label images and
 `samples.jsonl` to `data/<run>/` through the dev server, one run per episode. Episodes randomize the road
-(city or, 30% of the time, highway), weather, time of day, traffic, pedestrians and double-parked vans,
-play a scripted scenario for that road about a third of the time, and add correlated steering noise to half of the episodes so the data contains recoveries. With
-the neural driver on, the network drives and the expert only labels: that's a DAgger round.
+(city or, 30% of the time, highway; `--highway 0.8` / `?hwshare=` to change that), weather, time of day,
+traffic, pedestrians and double-parked vans, play a scripted scenario for that road about a third of the
+time, and add correlated steering noise to half of the episodes so the data contains recoveries. On the
+highway the expert picks a new preferred lane every 15–40 s, so the data covers every lane and plenty of
+lane changes, not just cruising in the right lane. With the neural driver on, the network drives and the
+expert only labels: that's a DAgger round.
 
 **Benchmark** (`B`) runs every scenario (2 trials each, clear day) and seven 90 s free drives (clear day,
 clear night, rain at dusk, fog, snow, and the highway by day and in rain at night) with the neural driver and scores them: passed scenarios, passed
@@ -126,6 +129,7 @@ without takeovers, meters of autonomous driving per takeover, contacts.
     npm run collect -- --seeds 101,102,103,104,105 --frames 6000        # expert data, 5 cities
     npm run train                                                        # -> models/policy.onnx
     npm run collect -- --seeds 201,202,203 --frames 4000 --neural --noise 0   # DAgger data
+    npm run collect -- --seeds 301,302,303 --frames 5000 --highway 0.8        # mostly highway
     npm run train -- --init models/policy.pt --epochs 6                  # fine-tune on all of data/
     npm run bench -- --seed 1 --out models/bench.json
 
