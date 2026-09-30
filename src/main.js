@@ -24,6 +24,8 @@ import { Collector } from './collect.js';
 import { NeuralDriver } from './neural.js';
 import { CollectSession, Benchmark } from './sessions.js';
 import { NeuralView, renderScorecard } from './neuralview.js';
+import { buildHighway } from './highwayMesh.js';
+import { HW } from './highway.js';
 
 const $ = (id) => document.getElementById(id);
 const DT = 1 / 60;
@@ -38,6 +40,8 @@ const settings = {
   cars: Number(params.get('cars') ?? 40),
   peds: Number(params.get('peds') ?? 70),
   vans: Number(params.get('vans') ?? 4), // double-parked delivery vans
+  road: params.get('road') === 'highway' ? 'highway' : 'city',
+  hwCars: Number(params.get('hwcars') ?? 60), // traffic on the highway loop
   weather: WEATHER[params.get('weather')] ? params.get('weather') : 'clear',
   scenario: SCENARIOS[params.get('scenario')] ? params.get('scenario') : '',
   debug: params.get('debug') === '1',
@@ -131,6 +135,8 @@ function applyTimeOfDay(hour) {
     mats.shop.emissiveIntensity = 0.05 + night * 0.8;
     mats.lamp.emissiveIntensity = night * 6;
   }
+  // Retroreflective highway signs catch the headlights.
+  for (const m of highway?.signs ?? []) m.emissiveIntensity = night * 0.35;
   fleet?.setNight(night);
   bloom.strength = 0.15 + night * 0.3;
   bloom.threshold = night > 0.3 ? 0.85 : 0.95;
@@ -147,7 +153,7 @@ function applyTimeOfDay(hour) {
 }
 
 // ---------- world ----------
-let mats, city, car, fleet, world, crowdView, debugView, precip, recorder;
+let mats, city, highway, car, fleet, world, crowdView, debugView, precip, recorder;
 let rig, collector, neural, neuralView, collectSession = null, bench = null;
 const driver = new DriverInput();
 
@@ -158,20 +164,25 @@ async function init() {
   await new Promise((r) => setTimeout(r, 0));
   city = new City(mats, rand);
   scene.add(city.group);
-  fleet = new Fleet(260);
+  // Its own random stream, so the city and its traffic stay the same for a given seed.
+  highway = buildHighway(mats, mulberry32(seed ^ 0x9e3779b9));
+  for (const m of highway.signs) m.emissiveMap = m.map;
+  scene.add(highway.group);
+  fleet = new Fleet(320);
   scene.add(fleet.group);
   const parked = placeParkedCars(city, fleet, rand);
 
   car = new Vehicle(0, 0, 0);
   scene.add(car.mesh);
   setWeather(settings.weather);
-  world = new World({ rand, car, fleet, parked, cars: settings.cars, peds: settings.peds, doubleParked: settings.vans });
+  world = new World({ rand, car, fleet, parked, cars: settings.cars, peds: settings.peds, doubleParked: settings.vans, highway: settings.hwCars });
+  if (settings.road === 'highway') world.setRoad('highway');
   city.setSignalColors((n, a) => world.signals.state(n, a));
   crowdView = new CrowdRenderer(scene, rand);
   debugView = new DebugOverlay();
   precip = new Precipitation(scene);
   recorder = new Recorder(renderer, scene);
-  rig = new SensorRig(renderer, scene, { classify: makeClassifier({ mats, city, fleet, crowdGroup: crowdView.group, egoMesh: car.mesh, sky }) });
+  rig = new SensorRig(renderer, scene, { classify: makeClassifier({ mats, city, fleet, crowdGroup: crowdView.group, egoMesh: car.mesh, sky, highway }) });
   collector = new Collector(rig);
   neural = new NeuralDriver();
   neuralView = new NeuralView();
@@ -179,6 +190,7 @@ async function init() {
   await crowdView.ready.catch((e) => console.warn('Pedestrian model failed to load', e));
 
   setWeatherUI(settings.weather);
+  setRoadUI(world.road);
   setDebug(settings.debug);
   if (settings.scenario) startScenario(settings.scenario);
   $('seed').textContent = seed;
@@ -308,6 +320,14 @@ function frame(now) {
 }
 
 const OT_TEXT = { passing: '⇠ Overtaking', returning: '⇢ Merging back', aborting: '↩ Aborting pass' };
+const LANE_NAMES = ['left lane', 'middle lane', 'right lane'];
+
+// Highway maneuver: the lane, or the lane change in progress and why.
+function laneText(l) {
+  if (l.changing) return `${l.changing === 'left' ? '⇠' : '⇢'} To the ${LANE_NAMES[l.lane]}${l.why ? ` · ${l.why}` : ''}`;
+  const name = LANE_NAMES[l.lane];
+  return `${name[0].toUpperCase()}${name.slice(1)} · limit ${Math.round(HW.speed * 3.6)} km/h`;
+}
 
 function updateHud() {
   $('speed').textContent = `${Math.round(car.v * 3.6)}`;
@@ -321,6 +341,7 @@ function updateHud() {
   const turn = c.nextTurn, ot = c.overtake;
   $('maneuver').textContent = c.manual
     ? `Manual · ${driver.source === 'gamepad' ? 'gamepad' : 'WASD / arrows'}`
+    : c.lanes ? laneText(c.lanes)
     : OT_TEXT[ot?.state] ?? (turn ? `${{ left: '↰ Left', right: '↱ Right', straight: '↑ Straight' }[turn.kind]} in ${Math.max(0, Math.round(turn.dist))} m` : '');
   const sig = c.signal;
   const el = $('signal');
@@ -337,6 +358,7 @@ function updateHud() {
   $('reason').hidden = !why;
   if (why) $('reason').textContent = c.lead && !['yield', 'overtake-wait'].includes(c.reason) ? `${why} · ${Math.round(c.lead.gap)} m` : why;
   $('traffic-count').textContent = world.traffic.background.length;
+  $('hw-count').textContent = world.traffic.highway.length;
   $('ped-count').textContent = world.crowd.peds.length;
   const h = settings.hour;
   $('clock').textContent = `${String(Math.floor(h)).padStart(2, '0')}:${String(Math.floor((h % 1) * 60)).padStart(2, '0')}`;
@@ -370,10 +392,28 @@ function startScenario(id) {
   $('scenario').value = id;
   if (id) world.startScenario(id);
   else world.endScenario();
+  setRoadUI(world.road);
   neural.reset(); // the car may have been moved
   seenContacts = world.contacts;
   setCam(settings.cam);
   updateHud();
+}
+
+function setRoadUI(road) {
+  $('road').value = road;
+}
+
+// Move the ego between the city and the highway (ends any scenario).
+function setRoad(road) {
+  if (world.scenario) startScenario('');
+  if (world.manual) toggleDrive();
+  world.setRoad(road);
+  settings.road = world.road;
+  setRoadUI(world.road);
+  neural.reset();
+  setCam(settings.cam);
+  updateHud();
+  toast(road === 'highway' ? `Highway · ${world.traffic.highway.length} cars` : 'City streets');
 }
 
 function setWeatherUI(name) {
@@ -424,7 +464,8 @@ function toggleRecord() {
 }
 
 function shareLink() {
-  const q = new URLSearchParams({ seed, hour: settings.hour.toFixed(2), cam: settings.cam, cars: settings.cars, peds: settings.peds, vans: settings.vans, weather: settings.weather });
+  const q = new URLSearchParams({ seed, hour: settings.hour.toFixed(2), cam: settings.cam, cars: settings.cars, peds: settings.peds, vans: settings.vans, hwcars: settings.hwCars, weather: settings.weather });
+  if (world.road === 'highway') q.set('road', 'highway');
   if (settings.scenario) q.set('scenario', settings.scenario);
   if (settings.debug) q.set('debug', '1');
   const url = `${location.origin}${location.pathname}?${q}`;
@@ -439,7 +480,7 @@ const app = {
   get world() {
     return world;
   },
-  setConditions({ weather, hour, cars, peds, vans }) {
+  setConditions({ road, weather, hour, cars, peds, vans, hwCars }) {
     settings.hour = hour;
     $('hour').value = hour;
     setWeatherUI(weather); // also applies the time of day
@@ -452,6 +493,16 @@ const app = {
     settings.vans = vans;
     if (!world.scenario) world.setDoubleParked(vans);
     else world.doubleParked = vans; // restored when the scenario ends
+    if (hwCars !== undefined) {
+      settings.hwCars = hwCars;
+      $('hwcars').value = hwCars;
+      world.traffic.setHighwayCount(hwCars, world.ego);
+    }
+    if (road && road !== world.road) {
+      world.setRoad(road);
+      neural.reset();
+      setRoadUI(world.road);
+    }
   },
   startScenario,
 };
@@ -612,7 +663,18 @@ $('peds').addEventListener('input', (e) => {
   settings.peds = +e.target.value;
   world.crowd.setCount(settings.peds);
 });
-for (const [id, def] of Object.entries(SCENARIOS)) $('scenario').append(new Option(def.name, id));
+for (const road of ['city', 'highway']) {
+  const grp = document.createElement('optgroup');
+  grp.label = road === 'city' ? 'City' : 'Highway';
+  for (const [id, def] of Object.entries(SCENARIOS)) if ((def.road ?? 'city') === road) grp.append(new Option(def.name.replace(/^Highway: /, ''), id));
+  $('scenario').append(grp);
+}
+$('road').addEventListener('change', (e) => setRoad(e.target.value));
+$('hwcars').value = settings.hwCars;
+$('hwcars').addEventListener('input', (e) => {
+  settings.hwCars = +e.target.value;
+  world.traffic.setHighwayCount(settings.hwCars, world.ego);
+});
 $('scenario').addEventListener('change', (e) => startScenario(e.target.value));
 $('btn-restart').addEventListener('click', () => startScenario(settings.scenario));
 for (const [id, w] of Object.entries(WEATHER)) $('weather').append(new Option(w.label, id));
@@ -653,6 +715,7 @@ window.addEventListener('keydown', (e) => {
   else if (key === 'c') toggleCollect();
   else if (key === 'n') setNeural(!world.policy);
   else if (key === 'b') runBenchmark();
+  else if (key === 'g') setRoad(world.road === 'highway' ? 'city' : 'highway');
   else if (key === 'h') setControlsVisible($('controls').hidden);
 });
 
