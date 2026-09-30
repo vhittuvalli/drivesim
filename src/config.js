@@ -18,6 +18,8 @@ export const STOP_LINE = ROAD_W / 2 + 5; // near edge of stop line (0.5 m wide)
 export const WHEELBASE = 2.8;
 export const MAX_STEER = 0.6;
 export const MAX_SPEED = 20;
+// Aerodynamic drag and rolling resistance (m/s^2) at speed v; drivers add it to their throttle.
+export const drag = (v) => 0.0025 * v * v + (v > 0 ? 0.08 : 0);
 
 export const BAY = 3; // facade window bay width
 export const FLOOR = 3.5; // floor height

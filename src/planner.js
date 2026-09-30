@@ -1,7 +1,7 @@
 // Routes on the street grid plus the driving logic shared by every vehicle:
 // curvature-aware desired speed, signal compliance with left-turn yielding,
 // obstacle detection along the planned path, and IDM car-following.
-import { LANE_W, ROAD_W, PITCH, STOP_LINE, GRID, WHEELBASE, MAX_STEER, nodePos, inGrid, clamp, conditions } from './config.js';
+import { LANE_W, ROAD_W, PITCH, STOP_LINE, GRID, WHEELBASE, MAX_STEER, nodePos, inGrid, clamp, conditions, drag } from './config.js';
 import { Path } from './path.js';
 
 export const CRUISE = 11; // m/s (~40 km/h, city speed)
@@ -20,6 +20,13 @@ function forConditions(p) {
   return g === 1 ? p : { ...p, T: p.T / g, b: p.b * g, a: p.a * Math.min(1, g * 1.3) };
 }
 const smooth = (u) => (u <= 0 ? 0 : u >= 1 ? 1 : u * u * (3 - 2 * u));
+
+// Throttle (> 0) or brake (< 0) command for a net acceleration at speed v, overcoming drag
+// (see Vehicle.step: full throttle is 3.2 m/s^2, full brake 7.5 m/s^2).
+export function throttleFor(acc, v) {
+  const a = acc + drag(v);
+  return a >= 0 ? a / 3.2 : a / 7.5;
+}
 
 export class Route extends Path {
   // opts.start: {i, j, d, along, lateral?, merge?} places the route on the lane leaving node (i, j)
@@ -494,7 +501,7 @@ export class Expert {
     let { acc, reason } = longitudinal(car.v, v0, sig, obs);
     if (reason === 'vehicle' && this.ot.info?.state === 'waiting' && obs.agent === this.ot.info.lead) reason = 'overtake-wait';
     // Hold the brake when stopped so the car doesn't creep.
-    let throttle = acc >= 0 ? acc / 3.2 : acc / 7.5;
+    let throttle = throttleFor(acc, car.v);
     if (car.v < 0.3 && acc < 0.2) throttle = -0.5;
 
     const nextTurn = r.turns.find((t) => t.s > this.s - 5);
