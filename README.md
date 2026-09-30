@@ -102,8 +102,10 @@ the expert drives for 3 s and it counts as a takeover.
 
 **Neural** (`N`) shows the network's view: the camera frame with its attention map, its segmentation, a
 live chart of its steering against the expert's (shaded where the safety driver drove) and the takeover
-tally. With the planner overlay (`O`) its predicted path is drawn in magenta (thin lines: the other
-command branches).
+tally. The **Steering wheel** card shows the network's wheel next to the expert's as a driver would turn
+them (15:1 steering ratio, ±516° lock to lock, moving at the car's steering rate), the angle between
+them, each one's brake / throttle, and a glow on whichever is in control. With the planner overlay
+(`O`) its predicted path is drawn in magenta (thin lines: the other command branches).
 
 **Collect** (`C`, or `?collect=<frames>`) drives on its own and streams frames, label images and
 `samples.jsonl` to `data/<run>/` through the dev server, one run per episode. Episodes randomize the road
@@ -189,7 +191,7 @@ The 2D prototype lives in `legacy/` (`/legacy/` on the dev server).
 | `src/safety.js` | Safety driver: supervises a learned driver, counts takeovers |
 | `src/neural.js` | Neural driver: ONNX Runtime Web inference, waypoint following |
 | `src/sessions.js` | Automated collection episodes and the benchmark |
-| `src/neuralview.js` | Neural driver panel (attention, segmentation, steering chart) and scorecard |
+| `src/neuralview.js` | Neural driver panel (attention, segmentation, steering chart, steering wheels) and scorecard |
 | `train/` | PyTorch dataset, model, training and ONNX export |
 | `scripts/serve.py`, `scripts/headless.mjs` | Dev server with the data upload API; headless Chrome runner |
 | `src/main.js` | Renderer, sky/sun, post-processing, cameras, HUD, controls |

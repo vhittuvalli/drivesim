@@ -96,6 +96,26 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 #collect-status { color: #ff9f0a; font-weight: 600; margin-top: 2px; }
 #collect-status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #ff9f0a; animation: blink 1s steps(2) infinite; }
 
+/* Steering wheels: network vs expert */
+#wheels { width: 250px; display: flex; flex-direction: column; gap: 6px; text-align: left; }
+#wheels[hidden] { display: none; }
+.wheel-pair { display: flex; justify-content: space-around; gap: 8px; }
+.wheel { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 4px; width: 104px; }
+.wheel svg { width: 92px; height: 92px; overflow: visible; }
+.wheel .turn { transition: none; }
+.wheel .rim { fill: none; stroke: #d7dde5; stroke-width: 7; opacity: 0.9; }
+.wheel .spokes { stroke: #aab3bf; stroke-width: 6; stroke-linecap: round; fill: none; }
+.wheel .hub { fill: #262c34; stroke: var(--c); stroke-width: 2.5; }
+.wheel .mark { fill: var(--c); }
+.wheel.driving svg { filter: drop-shadow(0 0 5px var(--c)); }
+.wheel.driving .rim { stroke: var(--c); }
+.wheel.idle { opacity: 0.4; }
+.wheel figcaption { display: flex; gap: 6px; font-size: 12px; }
+.wheel figcaption .deg { font-weight: 500; min-width: 5ch; text-align: right; }
+.pedal { position: relative; width: 84px; height: 5px; border-radius: 3px; background: rgba(255, 255, 255, 0.1); }
+.pedal::after { content: ''; position: absolute; left: 50%; top: -2px; bottom: -2px; width: 1px; background: rgba(255, 255, 255, 0.35); }
+.pedal i { position: absolute; top: 0; bottom: 0; border-radius: 3px; background: var(--c); }
+
 /* Benchmark scorecard */
 #scorecard { width: 330px; max-height: calc(100vh - 120px); overflow: auto; text-align: left; display: flex; flex-direction: column; gap: 6px; }
 #score-close { width: 22px; height: 22px; padding: 0; border-radius: 50%; line-height: 1; }
