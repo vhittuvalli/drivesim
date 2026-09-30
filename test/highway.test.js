@@ -129,3 +129,18 @@ test('highway safety driver: a perfect policy is never disengaged, a drifting on
     assert.equal(w.contacts, 0, name);
   }
 });
+
+test('highway: a preferred lane moves the expert there, and back right without one', () => {
+  const w = world(7, 20);
+  w.placeEgoHighway({ dir: 1, lane: 2, q: 100, v: 26 });
+  w.clearArea(w.highwayAreas(-100, 400));
+  const lanes = new Set([w.expert.route.lane]);
+  w.expert.lc.preferLane = 0;
+  for (let t = 0; t < 40 * 60 && w.expert.route.lane !== 0; t++) w.step(1 / 60), lanes.add(w.expert.route.lane);
+  assert.equal(w.expert.route.lane, 0, 'reached the preferred left lane');
+  assert.deepEqual([...lanes].sort(), [0, 1, 2], 'one lane at a time');
+  w.expert.lc.preferLane = null;
+  for (let t = 0; t < 40 * 60 && w.expert.route.lane !== 2; t++) w.step(1 / 60);
+  assert.equal(w.expert.route.lane, 2, 'kept right again');
+  assert.equal(w.contacts, 0);
+});

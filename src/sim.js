@@ -233,7 +233,7 @@ export class World {
         if (!cars.some((o) => o.dir === dir && Math.abs(loopDist(q, o.q)) < 70)) spot = { dir, q };
       }
       spot ??= { dir: 1, q: 0 };
-      this.placeEgoHighway({ ...spot, lane: 1 + Math.floor(this.rand() * 2), v: 22 });
+      this.placeEgoHighway({ ...spot, lane: Math.floor(this.rand() * 3), v: 22 });
     } else {
       const route = new Route(this.rand);
       const p0 = route.pts[0], p1 = route.pts[1];
