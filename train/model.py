@@ -92,7 +92,7 @@ class Policy(nn.Module):
         return wp, v_target, seg, depth, light, attention
 
 
-def losses(pred, batch, w_speed=0.5, w_seg=0.2, w_depth=2.0, w_light=0.5):
+def losses(pred, batch, w_speed=0.5, w_seg=0.2, w_depth=2.0, w_light=1.0):
     """Masked L1 on every labelled branch, L1 on the taken branch's target speed, and the aux terms."""
     wp, v_target, seg, depth, light, _ = pred
     mask = batch['wp_mask'][:, :, None, None]
@@ -103,6 +103,6 @@ def losses(pred, batch, w_speed=0.5, w_seg=0.2, w_depth=2.0, w_light=0.5):
     l_speed = (v - batch['v_target']).abs().mean()
     l_seg = F.cross_entropy(seg, batch['seg'])
     l_depth = (depth[:, 0] - batch['depth']).abs().mean()
-    l_light = F.cross_entropy(light, batch['light'])
+    l_light = F.cross_entropy(light, batch['light'], ignore_index=-100) if (batch['light'] >= 0).any() else light.sum() * 0
     total = l_wp + w_speed * l_speed + w_seg * l_seg + w_depth * l_depth + w_light * l_light
     return total, {'wp': l_wp.item(), 'speed': l_speed.item(), 'seg': l_seg.item(), 'depth': l_depth.item(), 'light': l_light.item()}

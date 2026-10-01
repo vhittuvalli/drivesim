@@ -20,6 +20,16 @@ from torch.utils.data import Dataset
 
 COMMANDS = ['left', 'straight', 'right']
 LIGHTS = ['none', 'red', 'yellow', 'green']  # must match src/labels.js
+# Beyond this distance a lamp is a pixel or two even in the traffic-light camera, so the light
+# label isn't learnable there: it is left out of the light loss (driving labels are unaffected).
+LIGHT_READABLE = 50.0  # m to the intersection
+IGNORE = -100
+
+
+def light_target(r):
+    if r['light'] != 'none' and r.get('cmd_dist') is not None and r['cmd_dist'] > LIGHT_READABLE:
+        return IGNORE
+    return LIGHTS.index(r['light'])
 N_WP = 8
 AUX_STRIDE = 4  # label images are 256x128 -> 64x32 auxiliary maps
 # Label version 2 (src/labels.js) spreads waypoints out with speed above this; version-1 rows
@@ -126,7 +136,7 @@ class DriveDataset(Dataset):
         return {
             'image': torch.from_numpy(img).permute(2, 0, 1),  # uint8 CHW
             'tele': torch.from_numpy(tele).permute(2, 0, 1),
-            'light': torch.tensor(LIGHTS.index(r['light'])),
+            'light': torch.tensor(light_target(r)),
             'speed': torch.tensor([max(0.0, v)], dtype=torch.float32),
             'wp': torch.from_numpy(wp),
             'wp_mask': torch.from_numpy(mask),
