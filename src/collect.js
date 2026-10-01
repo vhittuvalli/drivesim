@@ -5,7 +5,7 @@
 //                       speed, and what was actually applied (see labels.js)
 // Labels always come from the expert, also while the neural driver is in control; that's
 // DAgger: the network's own mistakes get labeled with the expert's correction.
-import { makeLabels } from './labels.js';
+import { makeLabels, LABEL_VERSION } from './labels.js';
 
 const FLUSH_EVERY = 50;
 const MAX_IN_FLIGHT = 64;
@@ -80,6 +80,7 @@ export class Collector {
       v_target: r2(lab.vTarget), acc: r2(world.expertCtrl.acc), reason: world.expertCtrl.reason ?? null, overtaking: lab.overtaking,
       steer: r2(c.steer), throttle: r2(c.throttle), driver: c.driver ?? 'expert', noise: r2(c.noise ?? 0),
       weather: info.weather, hour: r2(info.hour), scenario: info.scenario || null, road: lab.road, lane: lab.lane,
+      labels: LABEL_VERSION, wp_scale: r2(lab.wpScale),
     });
     if (this.rows.length >= FLUSH_EVERY) this.flush();
     return true;
