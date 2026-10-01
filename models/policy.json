@@ -51,21 +51,22 @@
     "terrain"
   ],
   "depth_range": 100,
-  "onnx_check_max_abs_diff": 1.0251998901367188e-05,
-  "trained": "2026-09-29T06:29:44+00:00",
-  "frames": 27021,
-  "runs": 53,
+  "onnx_check_max_abs_diff": 1.0728836059570312e-05,
+  "trained": "2026-09-30T22:25:38+00:00",
+  "frames": 67241,
+  "runs": 136,
   "drivers": {
-    "expert": 27021
+    "expert": 67227,
+    "neural": 14
   },
-  "epoch": 15,
+  "epoch": 6,
   "val": {
-    "wp": 0.1126,
-    "speed": 0.3025,
-    "seg": 0.2785,
-    "depth": 0.03,
-    "lateral_at_8m": 0.1519,
-    "seg_acc": 0.9049
+    "wp": 0.0763,
+    "speed": 0.2789,
+    "seg": 0.2517,
+    "depth": 0.0252,
+    "lateral_at_8m": 0.0929,
+    "seg_acc": 0.9156
   },
-  "init": null
+  "init": "models/policy.pt"
 }
