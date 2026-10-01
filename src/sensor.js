@@ -30,8 +30,10 @@ export class SensorRig {
   constructor(renderer, scene, { width = SENSOR.width, height = SENSOR.height, fov = SENSOR.fov, classify = null } = {}) {
     Object.assign(this, { renderer, scene, width, height, classify });
     this.cam = new THREE.PerspectiveCamera(fov, width / height, 0.1, 2000);
-    // Offscreen, tone mapping and sRGB conversion only happen in OutputPass.
-    this.composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(width, height, { type: THREE.UnsignedByteType }));
+    // Offscreen, tone mapping and sRGB conversion only happen in OutputPass. Half-float like the main
+    // view: an 8-bit target clips bright emissive colors before tone mapping, which turned a lit
+    // red signal lamp beige, close to the yellow one.
+    this.composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(width, height, { type: THREE.HalfFloatType }));
     this.composer.renderToScreen = false;
     this.composer.setPixelRatio(1);
     this.composer.setSize(width, height);
@@ -40,6 +42,7 @@ export class SensorRig {
     this.labelRT = new THREE.WebGLRenderTarget(width, height, { type: THREE.UnsignedByteType, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
     this.labelMats = CLASSES.map((_, i) => labelMaterial(i));
     this.pixels = new Uint8Array(width * height * 4);
+    this.halfPixels = new Uint16Array(width * height * 4);
     this.canvas = document.createElement('canvas');
     this.canvas.width = width;
     this.canvas.height = height;
@@ -57,7 +60,14 @@ export class SensorRig {
   // GL rows are bottom-up: copy into an ImageData top-down.
   read(rt) {
     const { width: w, height: h } = this;
-    this.renderer.readRenderTargetPixels(rt, 0, 0, w, h, this.pixels);
+    if (rt.texture.type === THREE.HalfFloatType) {
+      // Composer output: sRGB values in [0, 1] as half floats.
+      this.renderer.readRenderTargetPixels(rt, 0, 0, w, h, this.halfPixels);
+      const f = THREE.DataUtils.fromHalfFloat;
+      for (let i = 0; i < this.pixels.length; i++) this.pixels[i] = Math.round(Math.min(1, Math.max(0, f(this.halfPixels[i]))) * 255);
+    } else {
+      this.renderer.readRenderTargetPixels(rt, 0, 0, w, h, this.pixels);
+    }
     this.renderer.setRenderTarget(null);
     const img = new ImageData(w, h), row = w * 4;
     for (let y = 0; y < h; y++) img.data.set(this.pixels.subarray((h - 1 - y) * row, (h - y) * row), y * row);
