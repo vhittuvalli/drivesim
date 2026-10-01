@@ -19,10 +19,18 @@ from torch.utils.data import Dataset
 COMMANDS = ['left', 'straight', 'right']
 N_WP = 8
 AUX_STRIDE = 4  # label images are 256x128 -> 64x32 auxiliary maps
+# Label version 2 (src/labels.js) spreads waypoints out with speed above this; version-1 rows
+# faster than it have fixed spacing, which means something else, so they are left out.
+WP_SCALE_SPEED = 12.0
+
+
+def usable(r):
+    return r.get('labels', 1) >= 2 or r['v'] <= WP_SCALE_SPEED
 
 
 def load_runs(root):
-    """All runs under root as {run: [sample rows]}, keeping only rows whose files exist."""
+    """All runs under root as {run: [sample rows]}, keeping only rows whose files exist and whose
+    labels mean the same as the current version."""
     runs = {}
     for run in sorted(os.listdir(root)):
         path = os.path.join(root, run, 'samples.jsonl')
@@ -35,7 +43,7 @@ def load_runs(root):
                     continue
                 r = json.loads(line)
                 name = f"{r['frame']:06d}"
-                if os.path.isfile(os.path.join(root, run, 'frames', name + '.jpg')) and os.path.isfile(os.path.join(root, run, 'labels', name + '.png')):
+                if usable(r) and os.path.isfile(os.path.join(root, run, 'frames', name + '.jpg')) and os.path.isfile(os.path.join(root, run, 'labels', name + '.png')):
                     rows.append(r)
         if rows:
             runs[run] = rows
@@ -63,7 +71,8 @@ def split(runs, val_frac=0.1, block=200):
 
 
 def sample_weight(r):
-    """Oversample the informative moments: turns, speed changes. Undersample waiting at lights."""
+    """Oversample the informative moments: turns, lane changes, speed changes, pulling away from a
+    stop and hard braking. Undersample waiting at lights."""
     w = 1.0
     if r['command'] != 'straight' and r['cmd_dist'] is not None and r['cmd_dist'] < 30:
         w *= 2.5
@@ -73,6 +82,10 @@ def sample_weight(r):
         w *= 2
     if r['v'] < 0.3 and r['v_target'] < 0.3:
         w *= 0.4
+    if r['v'] < 1 and r['v_target'] > r['v'] + 0.5:  # pulling away: rare, and the network stalls without it
+        w *= 4
+    if r['v_target'] < r['v'] - 2:  # braking hard
+        w *= 1.5
     if r.get('overtaking'):
         w *= 2
     return w
