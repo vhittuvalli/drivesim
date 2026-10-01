@@ -86,7 +86,9 @@ A camera-based driving network is trained by imitation of the expert and runs in
 
 **The network** (`train/model.py`) sees the 256×128 roof camera and the car's speed. For each navigation
 command (left / straight / right at the next intersection) it predicts 8 waypoints and a target speed
-(conditional imitation learning); the route's next turn picks the branch. It also predicts coarse
+(conditional imitation learning); the route's next turn picks the branch. The waypoints are 2–23 m
+ahead up to 12 m/s and spread out in proportion to speed above that (57 m ahead at 30 m/s), so they
+always cover about two seconds of driving. It also predicts coarse
 segmentation and depth (auxiliary training targets) and an attention map. All branches are supervised
 wherever the expert can label them, not just the one taken (`src/labels.js`). On the highway the same
 three commands mean change lanes left / keep the lane / change lanes right: the command is the lane
@@ -97,8 +99,9 @@ the lane changes it could start right now.
 *simulation* time and the simulation waits for each answer, so it drives the same on a slow machine.
 Between observations its path is held in world coordinates and followed with pure pursuit; the target
 speed sets the throttle. The expert runs in shadow mode as a **safety driver** (`src/safety.js`): if the
-network leaves its lane, points the wrong way, or hasn't braked 0.3 s after the expert would brake hard,
-the expert drives for 3 s and it counts as a takeover.
+network leaves its lane, points the wrong way, hasn't braked 0.3 s after the expert would brake hard, or
+sits still for 2.5 s when the expert would pull away, the expert drives for 3 s and it counts as a
+takeover. Training oversamples turns, lane changes, pulling away from a stop and hard braking.
 
 **Neural** (`N`) shows the network's view: the camera frame with its attention map, its segmentation, a
 live chart of its steering against the expert's (shaded where the safety driver drove) and the takeover
