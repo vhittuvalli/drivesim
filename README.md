@@ -9,22 +9,41 @@ Browser-based self-driving simulator (three.js / WebGL, no build step).
 
 URL params: `?seed=<int>` (city layout), `?hour=4..22` (time of day), `?cam=chase|hood|orbit|top`,
 `?cars=0..120` (moving traffic), `?peds=0..200` (pedestrians), `?vans=<n>` (double-parked delivery vans),
-`?weather=clear|rain|fog|snow`, `?scenario=<id>` (see below), `?debug=1` (planner overlay).
+`?road=highway` (start on the highway), `?hwcars=0..160` (highway traffic),
+`?weather=clear|rain|fog|snow`, `?scenario=<id>` (see below), `?debug=1` (planner overlay), `?speed=1|2|4|8|16`,
+`?fx=0` (no post-processing), and for the learning tools `?collect=<frames>&noise=0..1`, `?neural=1`,
+`?bench=1&trials=<n>` (see [Learning to drive](#learning-to-drive)).
 The **Link** button copies a URL with the current setup.
 
 Keys: `1`–`4` switch camera, `Space` pauses, `M` take the wheel / hand back, `O` planner overlay,
-`R` start / stop dataset recording.
+`R` start / stop dataset recording, `C` collect training data, `N` neural driver, `B` benchmark,
+`G` city ⇄ highway.
+
+### Highway
+
+A divided motorway loops around the city (**Road** → Highway, or `G`): 5.2 km, three lanes each way,
+a concrete median, guardrails, lamp posts, sign gantries, 300 m corners and a gentle S-bend on two
+sides, at a 108 km/h limit. It's there to test drivers at speed: more distance covered per decision,
+curves taken near the grip limit, and traffic that changes lanes around you.
+
+Traffic on it follows IDM and decides lane changes with MOBIL (it changes when that improves its own
+acceleration by more than a threshold plus a politeness-weighted cost to the cars behind, and the new
+follower wouldn't have to brake hard). Drivers keep right except to pass, yield to cars merging ahead
+of them, have their own cruising speeds (vans stand in for slower trucks), and move over for a stalled
+car with its hazards on. The ego expert uses the same logic and looks up to 140 m ahead at speed.
 
 ### Driving yourself
 
 Press `M` (or **Drive**) and steer with WASD / arrow keys or a gamepad (left stick, triggers). Press `M` again
-to hand back to the expert; it needs you to be in a right-hand lane, heading along it. If you aren't, a
-second `M` puts the car on the nearest lane. Contacts with vehicles or pedestrians are reported.
+to hand back to the expert; it needs you to be in a right-hand lane, heading along it (on the highway:
+anywhere on your side of the road, heading along it; the expert merges into the nearest lane). If you
+aren't, a second `M` puts the car on the nearest lane. Contacts with vehicles or pedestrians are reported.
 
 ### Scenarios
 
-Pick one from **Scenario** (or `?scenario=`); ↻ restarts it. Each places the ego on a straight block, scripts
-the other actors, and passes or fails (any contact fails; so does running out of time).
+Pick one from **Scenario** (or `?scenario=`); ↻ restarts it. Each places the ego on a straight block (or a
+random stretch of highway), scripts the other actors, and passes or fails (any contact fails; so does
+running out of time).
 
 | id | What happens |
 |---|---|
@@ -36,6 +55,9 @@ the other actors, and passes or fails (any contact fails; so does running out of
 | `pull-out` | A parked car pulls into the lane just ahead |
 | `red-runner` | You have a green light; a car on the cross street runs its red |
 | `unprotected-left` | Left turn on green through a stream of oncoming traffic |
+| `hw-cut-in` | Highway, 100 km/h: a slower car swerves into your lane 14 m ahead and brakes; a car alongside blocks the other lane |
+| `hw-stalled` | A broken-down car in the right lane; find a gap in the middle-lane traffic and move over |
+| `hw-jam` | Traffic ahead brakes at 6.5 m/s² to a standstill in every lane, waits, then moves off |
 
 ### Planner overlay (`O`)
 
@@ -58,6 +80,63 @@ Renders the roof camera at 10 Hz (320×160) and, on stop, downloads a zip with `
 turn, overtake state, weather, hour) and `meta.json`. Recording while you drive gives human
 demonstrations; recording the expert gives privileged-driver labels.
 
+## Learning to drive
+
+A camera-based driving network is trained by imitation of the expert and runs in the browser.
+
+**The network** (`train/model.py`) sees the 256×128 roof camera and the car's speed. For each navigation
+command (left / straight / right at the next intersection) it predicts 8 waypoints and a target speed
+(conditional imitation learning); the route's next turn picks the branch. It also predicts coarse
+segmentation and depth (auxiliary training targets) and an attention map. All branches are supervised
+wherever the expert can label them, not just the one taken (`src/labels.js`). On the highway the same
+three commands mean change lanes left / keep the lane / change lanes right: the command is the lane
+change the expert is making, and while it keeps its lane the left and right branches are labeled with
+the lane changes it could start right now.
+
+**In the app** (`src/neural.js`) the network runs with ONNX Runtime Web (WASM). It observes at 10 Hz of
+*simulation* time and the simulation waits for each answer, so it drives the same on a slow machine.
+Between observations its path is held in world coordinates and followed with pure pursuit; the target
+speed sets the throttle. The expert runs in shadow mode as a **safety driver** (`src/safety.js`): if the
+network leaves its lane, points the wrong way, or hasn't braked 0.3 s after the expert would brake hard,
+the expert drives for 3 s and it counts as a takeover.
+
+**Neural** (`N`) shows the network's view: the camera frame with its attention map, its segmentation, a
+live chart of its steering against the expert's (shaded where the safety driver drove) and the takeover
+tally. The **Steering wheel** card shows the network's wheel next to the expert's as a driver would turn
+them (15:1 steering ratio, ±516° lock to lock, moving at the car's steering rate), the angle between
+them, each one's brake / throttle, and a glow on whichever is in control. With the planner overlay
+(`O`) its predicted path is drawn in magenta (thin lines: the other command branches).
+
+**Collect** (`C`, or `?collect=<frames>`) drives on its own and streams frames, label images and
+`samples.jsonl` to `data/<run>/` through the dev server, one run per episode. Episodes randomize the road
+(city or, 30% of the time, highway; `--highway 0.8` / `?hwshare=` to change that), weather, time of day,
+traffic, pedestrians and double-parked vans, play a scripted scenario for that road about a third of the
+time, and add correlated steering noise to half of the episodes so the data contains recoveries. On the
+highway the expert picks a new preferred lane every 15–40 s, so the data covers every lane and plenty of
+lane changes, not just cruising in the right lane. With the neural driver on, the network drives and the
+expert only labels: that's a DAgger round.
+
+**Benchmark** (`B`) runs every scenario (2 trials each, clear day) and seven 90 s free drives (clear day,
+clear night, rain at dusk, fog, snow, and the highway by day and in rain at night) with the neural driver and scores them: passed scenarios, passed
+without takeovers, meters of autonomous driving per takeover, contacts.
+
+### The loop
+
+    npm install                     # puppeteer-core, for the headless runs below
+    npm run dev                     # in another terminal
+    python3 -m venv .venv && .venv/bin/pip install -r train/requirements.txt
+
+    npm run collect -- --seeds 101,102,103,104,105 --frames 6000        # expert data, 5 cities
+    npm run train                                                        # -> models/policy.onnx
+    npm run collect -- --seeds 201,202,203 --frames 4000 --neural --noise 0   # DAgger data
+    npm run collect -- --seeds 301,302,303 --frames 5000 --highway 0.8        # mostly highway
+    npm run train -- --init models/policy.pt --epochs 6                  # fine-tune on all of data/
+    npm run bench -- --seed 1 --out models/bench.json
+
+`scripts/headless.mjs` runs the app in headless Chrome (set `CHROME=` if it isn't found), one browser per
+city seed. Everything also works from the UI: **Collect**, then `npm run train`, then **Neural** and
+**Benchmark**.
+
 ## Test
 
     npm test                       # headless simulation tests (Node 22+, no dependencies)
@@ -77,8 +156,12 @@ CI runs the tests and a short fuzz on every push to `main` and every pull reques
   crosswalks with occasional jaywalking; the ego yields to all of them.
 - **Scenarios and tools (done).** Overtaking (ego and NPCs), crossing-vehicle prediction, eight scripted
   scenarios, manual driving, planner overlay, weather, dataset recording, fuzzing.
+- **Highway (done).** A six-lane motorway loop around the city with MOBIL lane changing, three highway
+  scenarios, and highway drives in data collection and the benchmark.
 - Phase 3: realistic sensor model (noise, blur, exposure, latency).
-- Phase 4: neural driving policy trained on sensor data.
+- **Phase 4: neural driving policy (in progress).** Training labels, safety driver, sensor rig and
+  label images, data collection, PyTorch training and ONNX export, the in-browser neural driver,
+  DAgger and a benchmark. See [Learning to drive](#learning-to-drive).
 
 The 2D prototype lives in `legacy/` (`/legacy/` on the dev server).
 
@@ -96,13 +179,25 @@ The 2D prototype lives in `legacy/` (`/legacy/` on the dev server).
 | `src/peds.js` | Pedestrian simulation (sidewalks, crosswalks, jaywalking) |
 | `src/pedRender.js` | Animated pedestrian rendering |
 | `src/vehicle.js` | Bicycle-model physics + sedan model with sensor rig |
+| `src/path.js` | Polyline with arc length that vehicles follow (base of both route types) |
 | `src/planner.js` | Routes and shared driving logic (curve speed, signals, yielding, IDM, crossing prediction, overtaking) + ego expert |
+| `src/highway.js` | Highway loop geometry, routes along its lanes, MOBIL lane changing |
+| `src/highwayMesh.js` | Highway rendering: road, markings, barrier, guardrails, lamps, gantries, trees |
 | `src/sim.js` | Headless world: stepping, manual/expert control, contacts, weather conditions, scenario runner |
 | `src/scenarios.js` | Scripted scenarios and their pass/fail checks |
 | `src/input.js` | Keyboard / gamepad driving input |
 | `src/debug.js` | Planner overlay |
 | `src/weather.js` | Weather look and rain/snow particles |
 | `src/recorder.js`, `src/zip.js` | Camera dataset recorder and a minimal ZIP writer |
+| `src/labels.js` | Training labels from the expert: command, waypoints per command branch, target speed |
+| `src/sensor.js` | Roof camera render target and semantic class / depth label images |
+| `src/collect.js` | Streams training samples to the dev server; steering noise for recovery data |
+| `src/safety.js` | Safety driver: supervises a learned driver, counts takeovers |
+| `src/neural.js` | Neural driver: ONNX Runtime Web inference, waypoint following |
+| `src/sessions.js` | Automated collection episodes and the benchmark |
+| `src/neuralview.js` | Neural driver panel (attention, segmentation, steering chart, steering wheels) and scorecard |
+| `train/` | PyTorch dataset, model, training and ONNX export |
+| `scripts/serve.py`, `scripts/headless.mjs` | Dev server with the data upload API; headless Chrome runner |
 | `src/main.js` | Renderer, sky/sun, post-processing, cameras, HUD, controls |
 
 ## Assets

@@ -5,20 +5,27 @@
 // plus a target speed. Supervising all branches at once (not just the command that was taken)
 // is the dense-supervision idea behind "Learning by Cheating": the privileged planner knows
 // where each turn would have gone even when the car didn't take it.
+//
+// On the highway the same three commands mean: change to the left lane, keep the lane, change
+// to the right lane. The command is the lane change the expert is making; while it keeps its
+// lane, the left and right branches are labeled with the lane changes it could start now.
 import { ROAD_W, STOP_LINE, mulberry32 } from './config.js';
 import { Route } from './planner.js';
+import { HW, HighwayRoute, changeDistance, laneOf } from './highway.js';
 
 export const WP_DIST = [2, 4, 6, 8, 11, 14, 18, 23]; // meters along the path from the car
 export const COMMANDS = ['left', 'straight', 'right'];
-export const MAX_TARGET_SPEED = 14; // m/s
+export const MAX_TARGET_SPEED = 34; // m/s (highway speeds; city driving stays under 14)
 export const TARGET_HORIZON = 1; // s: target speed = speed the expert will have in this long
 
 // Semantic classes in the label images (R channel = class id, G = depth / 100 m).
 export const CLASSES = ['sky', 'road', 'marking', 'sidewalk', 'building', 'vegetation', 'pole', 'traffic light', 'vehicle', 'pedestrian', 'terrain'];
 export const DEPTH_RANGE = 100;
 
-// The command for the intersection we're approaching, or still crossing.
+// The command for the intersection we're approaching, or still crossing (on the highway: the
+// lane change in progress).
 export function commandOf(route, s) {
+  if (route.highway) return route.commandAt(s);
   for (const st of route.stops) {
     // The box ends ROAD_W past the intersection entry, which is (STOP_LINE - ROAD_W/2) past the line.
     if (st.s + STOP_LINE - ROAD_W / 2 + ROAD_W > s) return { kind: st.turn ?? 'straight', dist: st.s - s };
@@ -53,6 +60,14 @@ function branchWaypoints(pose, kind) {
   return pathWaypoints(route, 0, pose);
 }
 
+// Waypoints for changing from highway lane `from` to `lane`, starting at progress q.
+function laneChangeWaypoints(route, q, pose, from, lane, v) {
+  if (lane < 0 || lane >= HW.lanes) return null;
+  const hyp = new HighwayRoute({ dir: route.dir, lane: from, q });
+  hyp.changeLane(0, lane, changeDistance(v));
+  return pathWaypoints(hyp, 0, pose);
+}
+
 // Labels for the current state. `exp` is the expert's control output for this step (it may be
 // shadowing another driver, which is what makes DAgger work). Needs the expert to be tracking
 // its route, i.e. not while a human drives.
@@ -60,6 +75,19 @@ export function makeLabels(world, exp) {
   const { expert, car } = world;
   const route = expert.route, s = expert.s;
   const cmd = commandOf(route, s);
+  const vTarget = Math.min(MAX_TARGET_SPEED, Math.max(0, car.v + exp.acc * TARGET_HORIZON));
+  if (route.highway) {
+    const taken = pathWaypoints(route, s, car, null, expert.k);
+    const wp = { left: null, straight: null, right: null };
+    wp[cmd.kind] = taken;
+    // The lane the path is in here (route.lane is already the target once a change is planned).
+    const q = route.qAt(s, expert.k), lane = laneOf(route.latAt(q));
+    if (cmd.kind === 'straight') {
+      wp.left = laneChangeWaypoints(route, q, car, lane, lane - 1, car.v);
+      wp.right = laneChangeWaypoints(route, q, car, lane, lane + 1, car.v);
+    }
+    return { command: cmd.kind, cmdDist: null, wp, vTarget, overtaking: false, road: 'highway', lane };
+  }
   const overtaking = !!expert.ot.active;
   const taken = pathWaypoints(route, s, car, overtaking ? expert.ot.offsetAt : null, expert.k);
   const wp = { left: null, straight: null, right: null };
@@ -70,6 +98,5 @@ export function makeLabels(world, exp) {
     // Far from the intersection every branch just follows the lane.
     wp[kind] = cmd.dist > horizon ? taken : branchWaypoints(car, kind);
   }
-  const vTarget = Math.min(MAX_TARGET_SPEED, Math.max(0, car.v + exp.acc * TARGET_HORIZON));
-  return { command: cmd.kind, cmdDist: Number.isFinite(cmd.dist) ? cmd.dist : null, wp, vTarget, overtaking };
+  return { command: cmd.kind, cmdDist: Number.isFinite(cmd.dist) ? cmd.dist : null, wp, vTarget, overtaking, road: 'city', lane: null };
 }

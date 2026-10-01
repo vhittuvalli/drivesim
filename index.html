@@ -9,7 +9,8 @@
     {
       "imports": {
         "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
-        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+        "onnxruntime-web": "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/ort.wasm.min.mjs"
       }
     }
   </script>
@@ -22,6 +23,22 @@
     <div class="card" id="maneuver-card"><div id="maneuver"></div></div>
     <div class="card signal" id="signal" hidden><i></i><span id="signal-text"></span></div>
     <div class="card" id="reason" hidden></div>
+    <div class="card" id="neural-panel" hidden>
+      <div class="row between"><b>Neural driver</b><span id="nn-driver" class="pill"></span></div>
+      <div class="small" id="nn-stats"></div>
+      <div class="small mono muted" id="nn-info"></div>
+      <div class="pip">
+        <figure><canvas id="nn-cam" width="256" height="128"></canvas><figcaption>Camera · attention</figcaption></figure>
+        <figure><canvas id="nn-seg" width="64" height="32"></canvas><figcaption>Segmentation</figcaption></figure>
+      </div>
+      <div class="chart-head small">
+        <span>Steering</span>
+        <span class="legend"><i style="background:#3987e5"></i>Network <b id="nn-steer-nn" class="mono"></b></span>
+        <span class="legend"><i style="background:#d95926"></i>Expert <b id="nn-steer-ex" class="mono"></b></span>
+      </div>
+      <canvas id="nn-chart"></canvas>
+      <div class="small muted chart-foot"><span>−12 s</span><span>shaded: safety driver · up: right</span><span>now</span></div>
+    </div>
   </div>
 
   <div id="hud-right">
@@ -29,6 +46,45 @@
       <div><span id="clock"></span> · <span id="fps"></span></div>
       <div class="muted">seed <span id="seed"></span></div>
       <div id="rec" hidden><i class="dot"></i> REC <span id="rec-count">0</span></div>
+      <div id="collect-status" hidden><i class="dot"></i> <span></span></div>
+    </div>
+    <div class="card" id="wheels" hidden>
+      <div class="row between"><b>Steering wheel</b><span class="small muted" id="wheel-diff"></span></div>
+      <div class="wheel-pair">
+        <figure class="wheel" id="wheel-nn" style="--c:#3987e5">
+          <svg viewBox="-50 -50 100 100" aria-hidden="true">
+            <g class="turn">
+              <circle class="rim" r="39"></circle>
+              <path class="spokes" d="M-37 4 L-10 4 M37 4 L10 4 M0 12 L0 37"></path>
+              <circle class="hub" r="11"></circle>
+              <rect class="mark" x="-3" y="-47" width="6" height="12" rx="1.5"></rect>
+            </g>
+          </svg>
+          <figcaption><span>Network</span><b class="mono deg"></b></figcaption>
+          <div class="pedal" title="Brake (left) · throttle (right)"><i></i></div>
+        </figure>
+        <figure class="wheel" id="wheel-ex" style="--c:#d95926">
+          <svg viewBox="-50 -50 100 100" aria-hidden="true">
+            <g class="turn">
+              <circle class="rim" r="39"></circle>
+              <path class="spokes" d="M-37 4 L-10 4 M37 4 L10 4 M0 12 L0 37"></path>
+              <circle class="hub" r="11"></circle>
+              <rect class="mark" x="-3" y="-47" width="6" height="12" rx="1.5"></rect>
+            </g>
+          </svg>
+          <figcaption><span>Expert</span><b class="mono deg"></b></figcaption>
+          <div class="pedal" title="Brake (left) · throttle (right)"><i></i></div>
+        </figure>
+      </div>
+      <div class="small muted">Steering-wheel angle at a 15:1 ratio (±516° lock to lock) · bar: brake ← → throttle · glow: in control</div>
+    </div>
+    <div class="card" id="scorecard" hidden>
+      <div class="row between"><b>Benchmark</b><button id="score-close" aria-label="Close scorecard">×</button></div>
+      <div class="small mono muted" id="score-progress"></div>
+      <div id="score-summary" hidden></div>
+      <table><thead><tr><th>Scenario</th><th>Trials</th></tr></thead><tbody id="score-scenarios"></tbody></table>
+      <table><thead><tr><th>Free drive</th><th class="num">Dist</th><th class="num">Takeovers</th><th class="num">Contacts</th></tr></thead><tbody id="score-drives"></tbody></table>
+      <div class="small muted">✓ passed · ✓* passed with takeovers · ✗ failed (hover for details)</div>
     </div>
     <div class="card" id="scenario-card" hidden>
       <div class="row between"><b id="sc-name"></b><span id="sc-status" class="pill"></span></div>
@@ -56,8 +112,19 @@
       <input type="range" id="hour" min="4" max="22" step="0.05" value="14.5">
     </div>
     <div class="group">
+      <label>Road</label>
+      <select id="road" title="City streets or the highway loop around the city (G)">
+        <option value="city">City</option>
+        <option value="highway">Highway</option>
+      </select>
+    </div>
+    <div class="group">
       <label>Traffic · <span id="traffic-count">0</span> cars</label>
       <input type="range" id="cars" min="0" max="120" step="1" value="40">
+    </div>
+    <div class="group">
+      <label>Highway · <span id="hw-count">0</span> cars</label>
+      <input type="range" id="hwcars" min="0" max="160" step="1" value="60">
     </div>
     <div class="group">
       <label>Pedestrians · <span id="ped-count">0</span></label>
@@ -84,9 +151,17 @@
       </div>
     </div>
     <div class="group">
+      <label>Learning</label>
+      <div class="row">
+        <button id="btn-collect" title="Drive automatically in varied conditions and stream training data to data/ (C)">Collect</button>
+        <button id="btn-neural" title="Let the trained network drive, with the expert as safety driver (N)">Neural</button>
+        <button id="btn-bench" title="Score the network on every scenario and in free driving (B)">Benchmark</button>
+      </div>
+    </div>
+    <div class="group">
       <label>Sim</label>
       <div class="row">
-        <select id="sim-speed"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select>
+        <select id="sim-speed"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option><option value="16">16×</option></select>
         <button id="btn-pause">Pause</button>
         <button id="btn-city">New city</button>
       </div>

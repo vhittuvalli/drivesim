@@ -67,6 +67,8 @@ def sample_weight(r):
     w = 1.0
     if r['command'] != 'straight' and r['cmd_dist'] is not None and r['cmd_dist'] < 30:
         w *= 2.5
+    if r['command'] != 'straight' and r.get('road') == 'highway':  # a lane change
+        w *= 2.5
     if abs(r['v_target'] - r['v']) > 1:
         w *= 2
     if r['v'] < 0.3 and r['v_target'] < 0.3:

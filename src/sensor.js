@@ -116,13 +116,15 @@ export class SensorRig {
 }
 
 // Build the classifier for the label pass from the scene's known materials and groups.
-export function makeClassifier({ mats, city, fleet, crowdGroup, egoMesh, sky }) {
+// highway: {group, classes: Map(material -> class name)} from buildHighway.
+export function makeClassifier({ mats, city, fleet, crowdGroup, egoMesh, sky, highway = null }) {
   const id = (name) => CLASSES.indexOf(name);
   const byMat = new Map([
     [mats.asphalt, id('road')], [mats.marking, id('marking')], [mats.sidewalk, id('sidewalk')], [mats.curb, id('sidewalk')],
     [mats.roof, id('building')], [mats.shop, id('building')], ...Object.values(mats.facades).map((m) => [m, id('building')]),
     [mats.bark, id('vegetation')], [mats.foliage, id('vegetation')],
     [mats.metal, id('pole')], [mats.darkMetal, id('pole')], [mats.lamp, id('pole')], [mats.signalHousing, id('traffic light')],
+    ...[...(highway?.classes ?? [])].map(([m, name]) => [m, id(name)]),
   ]);
   const signalLamps = new Set(Object.values(city.lamps ?? {}));
   const under = (o, root) => {
@@ -137,7 +139,7 @@ export function makeClassifier({ mats, city, fleet, crowdGroup, egoMesh, sky }) 
     if (under(o, fleet.group)) return id('vehicle');
     if (under(o, crowdGroup)) return id('pedestrian');
     if (under(o, egoMesh)) return -1;
-    if (under(o, city.group)) return id('terrain');
+    if (under(o, city.group) || (highway && under(o, highway.group))) return id('terrain');
     return -1;
   };
 }
