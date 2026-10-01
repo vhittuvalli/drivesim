@@ -1,6 +1,8 @@
 // The roof camera as a sensor: renders what the driving network sees (tone-mapped sRGB, no
 // bloom/AO) into a small offscreen target, and optionally a label image of the same view with
 // the semantic class id in R and depth in G (depth / DEPTH_RANGE), used as auxiliary targets.
+// A second, narrow camera (the traffic-light camera) looks a little up the road at about 3x the
+// magnification, so signal lamps are several pixels across instead of one.
 import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
@@ -8,6 +10,8 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { CLASSES, DEPTH_RANGE } from './labels.js';
 
 export const SENSOR = { width: 256, height: 128, fov: 70, height_m: 1.62 };
+// Traffic-light camera: same mount, 22 degree vertical field of view, pitched 6 degrees up.
+export const TELE = { width: 256, height: 128, fov: 22, pitch: 6 };
 
 // Flat class color with view depth written to G. Works for instanced and skinned meshes.
 function labelMaterial(id) {
@@ -30,16 +34,26 @@ export class SensorRig {
   constructor(renderer, scene, { width = SENSOR.width, height = SENSOR.height, fov = SENSOR.fov, classify = null } = {}) {
     Object.assign(this, { renderer, scene, width, height, classify });
     this.cam = new THREE.PerspectiveCamera(fov, width / height, 0.1, 2000);
-    // Offscreen, tone mapping and sRGB conversion only happen in OutputPass.
-    this.composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(width, height, { type: THREE.UnsignedByteType }));
+    // Offscreen, tone mapping and sRGB conversion only happen in OutputPass. Half-float like the main
+    // view: an 8-bit target clips bright emissive colors before tone mapping, which turned a lit
+    // red signal lamp beige, close to the yellow one.
+    this.composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(width, height, { type: THREE.HalfFloatType }));
     this.composer.renderToScreen = false;
     this.composer.setPixelRatio(1);
     this.composer.setSize(width, height);
     this.composer.addPass(new RenderPass(scene, this.cam));
     this.composer.addPass(new OutputPass());
+    this.teleCam = new THREE.PerspectiveCamera(TELE.fov, TELE.width / TELE.height, 0.1, 2000);
+    this.teleComposer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(TELE.width, TELE.height, { type: THREE.HalfFloatType }));
+    this.teleComposer.renderToScreen = false;
+    this.teleComposer.setPixelRatio(1);
+    this.teleComposer.setSize(TELE.width, TELE.height);
+    this.teleComposer.addPass(new RenderPass(scene, this.teleCam));
+    this.teleComposer.addPass(new OutputPass());
     this.labelRT = new THREE.WebGLRenderTarget(width, height, { type: THREE.UnsignedByteType, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
     this.labelMats = CLASSES.map((_, i) => labelMaterial(i));
     this.pixels = new Uint8Array(width * height * 4);
+    this.halfPixels = new Uint16Array(width * height * 4);
     this.canvas = document.createElement('canvas');
     this.canvas.width = width;
     this.canvas.height = height;
@@ -54,10 +68,23 @@ export class SensorRig {
     this.cam.lookAt(pose.x + fx * 20, 1.2, pose.z + fz * 20);
   }
 
+  mountTele(pose) {
+    const fx = Math.cos(pose.h), fz = Math.sin(pose.h), up = 20 * Math.tan((TELE.pitch * Math.PI) / 180);
+    this.teleCam.position.set(pose.x + fx * 0.05, SENSOR.height_m, pose.z + fz * 0.05);
+    this.teleCam.lookAt(pose.x + fx * 20, SENSOR.height_m + up, pose.z + fz * 20);
+  }
+
   // GL rows are bottom-up: copy into an ImageData top-down.
   read(rt) {
     const { width: w, height: h } = this;
-    this.renderer.readRenderTargetPixels(rt, 0, 0, w, h, this.pixels);
+    if (rt.texture.type === THREE.HalfFloatType) {
+      // Composer output: sRGB values in [0, 1] as half floats.
+      this.renderer.readRenderTargetPixels(rt, 0, 0, w, h, this.halfPixels);
+      const f = THREE.DataUtils.fromHalfFloat;
+      for (let i = 0; i < this.pixels.length; i++) this.pixels[i] = Math.round(Math.min(1, Math.max(0, f(this.halfPixels[i]))) * 255);
+    } else {
+      this.renderer.readRenderTargetPixels(rt, 0, 0, w, h, this.pixels);
+    }
     this.renderer.setRenderTarget(null);
     const img = new ImageData(w, h), row = w * 4;
     for (let y = 0; y < h; y++) img.data.set(this.pixels.subarray((h - 1 - y) * row, (h - y) * row), y * row);
@@ -68,6 +95,13 @@ export class SensorRig {
     this.mount(pose);
     this.composer.render();
     return this.read(this.composer.readBuffer);
+  }
+
+  // The traffic-light camera (same size as the main one).
+  renderTele(pose) {
+    this.mountTele(pose);
+    this.teleComposer.render();
+    return this.read(this.teleComposer.readBuffer);
   }
 
   renderLabels(pose) {

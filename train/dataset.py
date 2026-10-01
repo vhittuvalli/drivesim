@@ -1,6 +1,8 @@
 """Reads the runs collected by the browser (data/<run>/, see src/collect.js).
 
 Each sample: roof-camera image, current speed, and targets:
+  tele     traffic-light camera image (runs from label version 3 on; older runs are skipped)
+  light    ()         signal ahead: index into LIGHTS
   wp       (3, 8, 2)  waypoints (x forward, y left, meters) for each command branch
   wp_mask  (3,)       which branches have a label (all of them away from intersections)
   cmd      ()         index of the command actually taken (the branch the speed label is for)
@@ -17,6 +19,17 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 COMMANDS = ['left', 'straight', 'right']
+LIGHTS = ['none', 'red', 'yellow', 'green']  # must match src/labels.js
+# Beyond this distance a lamp is a pixel or two even in the traffic-light camera, so the light
+# label isn't learnable there: it is left out of the light loss (driving labels are unaffected).
+LIGHT_READABLE = 50.0  # m to the intersection
+IGNORE = -100
+
+
+def light_target(r):
+    if r['light'] != 'none' and r.get('cmd_dist') is not None and r['cmd_dist'] > LIGHT_READABLE:
+        return IGNORE
+    return LIGHTS.index(r['light'])
 N_WP = 8
 AUX_STRIDE = 4  # label images are 256x128 -> 64x32 auxiliary maps
 # Label version 2 (src/labels.js) spreads waypoints out with speed above this; version-1 rows
@@ -43,7 +56,8 @@ def load_runs(root):
                     continue
                 r = json.loads(line)
                 name = f"{r['frame']:06d}"
-                if usable(r) and os.path.isfile(os.path.join(root, run, 'frames', name + '.jpg')) and os.path.isfile(os.path.join(root, run, 'labels', name + '.png')):
+                files = [os.path.join(root, run, d, name + ext) for d, ext in (('frames', '.jpg'), ('tele', '.jpg'), ('labels', '.png'))]
+                if usable(r) and 'light' in r and all(os.path.isfile(p) for p in files):
                     rows.append(r)
         if rows:
             runs[run] = rows
@@ -81,7 +95,8 @@ def sample_weight(r):
     if abs(r['v_target'] - r['v']) > 1:
         w *= 2
     if r['v'] < 0.3 and r['v_target'] < 0.3:
-        w *= 0.4
+        # Waiting at a red light is the counterpart of pulling away at a green one: keep it.
+        w *= 1.5 if r.get('light') in ('red', 'yellow') else 0.4
     if r['v'] < 1 and r['v_target'] > r['v'] + 0.5:  # pulling away: rare, and the network stalls without it
         w *= 4
     if r['v_target'] < r['v'] - 2:  # braking hard
@@ -102,6 +117,7 @@ class DriveDataset(Dataset):
         run, r = self.items[i]
         name = f"{r['frame']:06d}"
         img = np.array(Image.open(os.path.join(self.root, run, 'frames', name + '.jpg')).convert('RGB'), dtype=np.uint8)
+        tele = np.array(Image.open(os.path.join(self.root, run, 'tele', name + '.jpg')).convert('RGB'), dtype=np.uint8)
         lab = np.array(Image.open(os.path.join(self.root, run, 'labels', name + '.png')).convert('RGB'), dtype=np.uint8)
         s = AUX_STRIDE
         seg = lab[s // 2::s, s // 2::s, 0].astype(np.int64)
@@ -119,6 +135,8 @@ class DriveDataset(Dataset):
         v = r['v'] + (np.random.randn() * self.speed_noise if self.speed_noise else 0.0)
         return {
             'image': torch.from_numpy(img).permute(2, 0, 1),  # uint8 CHW
+            'tele': torch.from_numpy(tele).permute(2, 0, 1),
+            'light': torch.tensor(light_target(r)),
             'speed': torch.tensor([max(0.0, v)], dtype=torch.float32),
             'wp': torch.from_numpy(wp),
             'wp_mask': torch.from_numpy(mask),

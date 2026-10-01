@@ -1,6 +1,7 @@
 // Neural driver: runs the trained policy (models/policy.onnx, see train/) in the browser with
-// ONNX Runtime Web and plugs into World.setPolicy(). The network sees the roof camera and the
-// car's speed; the route's next turn picks the command branch (conditional imitation learning).
+// ONNX Runtime Web and plugs into World.setPolicy(). The network sees the roof camera (and, if it
+// was trained with one, the traffic-light camera) and the car's speed; the route's next turn picks
+// the command branch (conditional imitation learning).
 //
 // Observations are taken at a fixed rate of simulation time and the simulation waits for each
 // answer (see due / waiting), so the driver behaves the same however long inference takes.
@@ -76,6 +77,7 @@ export class NeuralDriver {
     this.meta = null;
     this.commands = COMMANDS; // order of the network's command branches
     this.inferMs = 0;
+    this.usesTele = false;
     this.reset();
   }
 
@@ -95,6 +97,7 @@ export class NeuralDriver {
     this.session = await ort.InferenceSession.create(`${base}.onnx`, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
     this.commands = this.meta.commands;
     [, , this.inH, this.inW] = this.meta.inputs.image;
+    this.usesTele = !!this.meta.inputs.tele;
     return this.meta;
   }
 
@@ -116,9 +119,10 @@ export class NeuralDriver {
     return this.ready && !this.pending && t >= this.nextObs;
   }
 
-  // Run the network on `rgb` (the roof camera at the car's current pose). Resolves when the
-  // prediction is in place; the simulation stays paused until then.
-  async observe(world, rgb) {
+  // Run the network on `rgb` (the roof camera at the car's current pose) and `tele` (the
+  // traffic-light camera, for networks that use it). Resolves when the prediction is in place;
+  // the simulation stays paused until then.
+  async observe(world, rgb, tele = null) {
     const { car, expert } = world;
     const pose = { x: car.x, z: car.z, h: car.h }, t = world.t, v = car.v;
     const cmd = commandOf(expert.route, expert.s).kind;
@@ -127,14 +131,22 @@ export class NeuralDriver {
     const t0 = performance.now();
     try {
       const { Tensor } = this.ort;
-      const out = await this.session.run({
+      const feeds = {
         image: new Tensor('float32', toTensorData(rgb), [1, 3, this.inH, this.inW]),
         speed: new Tensor('float32', Float32Array.of(v), [1, 1]),
-      });
+      };
+      if (this.usesTele) feeds.tele = new Tensor('float32', toTensorData(tele), [1, 3, ...this.meta.inputs.tele.slice(2)]);
+      const out = await this.session.run(feeds);
+      // Probabilities for the light ahead (networks trained with the traffic-light camera).
+      let light = null;
+      if (out.light) {
+        const z = Array.from(out.light.data), m = Math.max(...z), e = z.map((x) => Math.exp(x - m)), sum = e.reduce((a, b) => a + b, 0);
+        light = Object.fromEntries(this.meta.lights.map((k, i) => [k, e[i] / sum]));
+      }
       const wp = out.waypoints.data, nWp = this.meta.n_waypoints;
       const branches = this.commands.map((_, k) => Array.from({ length: nWp }, (_, i) => [wp[(k * nWp + i) * 2], wp[(k * nWp + i) * 2 + 1]]));
       this.setPrediction(pose, cmd, branches, Array.from(out.v_target.data), {
-        t, v, seg: out.seg.data, segDims: out.seg.dims, attention: out.attention.data, attnDims: out.attention.dims, image: rgb,
+        t, v, seg: out.seg.data, segDims: out.seg.dims, attention: out.attention.data, attnDims: out.attention.dims, image: rgb, tele, light,
       });
       for (const k of Object.keys(out)) out[k].dispose?.();
       const ms = performance.now() - t0;

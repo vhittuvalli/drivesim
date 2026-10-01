@@ -125,3 +125,19 @@ test('safety driver: takes over from a policy that will not pull away, and the c
   assert.ok(w.safety.totalDist > 40, `the expert drove during takeovers: ${w.safety.totalDist.toFixed(0)} m`);
   assert.equal(w.contacts, 0);
 });
+
+test('labels: the light ahead is labeled red, yellow or green near a stop line, none elsewhere', async () => {
+  const { lightOf } = await import('../src/labels.js');
+  const w = world(3);
+  const seen = new Set();
+  for (let t = 0; t < 120 * 60; t++) {
+    w.step(1 / 60);
+    if (t % 15) continue;
+    const L = makeLabels(w, w.expertCtrl), st = w.expertCtrl.signal;
+    assert.equal(L.light, lightOf(w.expertCtrl));
+    if (L.light !== 'none') assert.ok(st && st.dist < 90 && L.light === st.state);
+    if (w.expertCtrl.reason === 'signal') assert.ok(['red', 'yellow'].includes(L.light), `stopping for ${L.light}`);
+    seen.add(L.light);
+  }
+  assert.ok(seen.has('red') && seen.has('green') && seen.has('none'), [...seen].join());
+});

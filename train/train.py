@@ -51,21 +51,30 @@ def augment(img):
 def evaluate(model, loader, device):
     model.eval()
     sums, n = {}, 0
+    counts = {'light': [0, 0], 'signal': [0, 0]}
     for batch in loader:
         batch = {k: v.to(device) for k, v in batch.items()}
-        pred = model(batch['image'].float() / 255, batch['speed'])
+        pred = model(batch['image'].float() / 255, batch['tele'].float() / 255, batch['speed'])
         _, parts = losses(pred, batch)
         wp = pred[0]
         taken = wp[torch.arange(len(wp)), batch['cmd']]
         target = batch['wp'][torch.arange(len(wp)), batch['cmd']]
         parts['lateral_at_8m'] = (taken[:, 3, 1] - target[:, 3, 1]).abs().mean().item()
         parts['seg_acc'] = (pred[2].argmax(1) == batch['seg']).float().mean().item()
+        # Light accuracy as counts: per-batch means would score batches with no signal in view
+        # (a highway stretch) as 0%.
+        hit = pred[4].argmax(1) == batch['light']
+        graded, lit = batch['light'] >= 0, batch['light'] > 0
+        counts['light'] = [counts['light'][0] + int(hit[graded].sum()), counts['light'][1] + int(graded.sum())]
+        counts['signal'] = [counts['signal'][0] + int(hit[lit].sum()), counts['signal'][1] + int(lit.sum())]
         k = len(wp)
         for key, val in parts.items():
             sums[key] = sums.get(key, 0) + val * k
         n += k
     model.train()
-    return {k: v / max(n, 1) for k, v in sums.items()}
+    out = {k: v / max(n, 1) for k, v in sums.items()}
+    out['light_acc'], out['signal_acc'] = (c / max(t, 1) for c, t in (counts['light'], counts['signal']))
+    return out
 
 
 def main():
@@ -113,7 +122,7 @@ def main():
         t0, run_loss = time.time(), 0.0
         for i, batch in enumerate(train_dl):
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
-            pred = model(augment(batch['image']), batch['speed'])
+            pred = model(augment(batch['image']), augment(batch['tele']), batch['speed'])
             loss, _ = losses(pred, batch)
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -129,7 +138,7 @@ def main():
             torch.save({'model': model.state_dict(), 'epoch': epoch, 'metrics': m}, a.out + '.pt')
         print(
             f'epoch {epoch:2d}  train {run_loss / len(train_dl):.3f}  val wp {m["wp"]:.3f} m  lateral@8m {m["lateral_at_8m"]:.2f} m  '
-            f'speed {m["speed"]:.2f} m/s  seg acc {m["seg_acc"]:.1%}  depth {m["depth"]:.3f}  ({time.time() - t0:.0f}s){tag}'
+            f'speed {m["speed"]:.2f} m/s  light acc {m["light_acc"]:.1%} (at signals within 50 m {m["signal_acc"]:.1%})  seg acc {m["seg_acc"]:.1%}  depth {m["depth"]:.3f}  ({time.time() - t0:.0f}s){tag}'
         )
 
     ck = torch.load(a.out + '.pt', map_location='cpu')
