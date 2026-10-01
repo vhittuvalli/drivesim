@@ -13,10 +13,10 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from dataset import COMMANDS  # noqa: E402
+from dataset import COMMANDS, LIGHTS  # noqa: E402
 from model import IMAGE_SIZE, N_WP, Policy  # noqa: E402
 
-OUTPUTS = ['waypoints', 'v_target', 'seg', 'depth', 'attention']
+OUTPUTS = ['waypoints', 'v_target', 'seg', 'depth', 'light', 'attention']
 WP_DIST = [2, 4, 6, 8, 11, 14, 18, 23]  # must match src/labels.js
 CLASSES = ['sky', 'road', 'marking', 'sidewalk', 'building', 'vegetation', 'pole', 'traffic light', 'vehicle', 'pedestrian', 'terrain']
 
@@ -25,26 +25,29 @@ def export(model, base, info=None):
     model = model.eval().cpu()
     h, w = IMAGE_SIZE
     image = torch.rand(1, 3, h, w)
+    tele = torch.rand(1, 3, h, w)
     speed = torch.tensor([[5.0]])
     onnx_path = base + '.onnx'
     torch.onnx.export(
-        model, (image, speed), onnx_path, input_names=['image', 'speed'], output_names=OUTPUTS,
-        dynamic_axes={n: {0: 'batch'} for n in ['image', 'speed', *OUTPUTS]}, opset_version=17, dynamo=False,
+        model, (image, tele, speed), onnx_path, input_names=['image', 'tele', 'speed'], output_names=OUTPUTS,
+        dynamic_axes={n: {0: 'batch'} for n in ['image', 'tele', 'speed', *OUTPUTS]}, opset_version=17, dynamo=False,
     )
 
     import onnxruntime as ort
 
     sess = ort.InferenceSession(onnx_path, providers=['CPUExecutionProvider'])
-    got = sess.run(None, {'image': image.numpy(), 'speed': speed.numpy()})
+    got = sess.run(None, {'image': image.numpy(), 'tele': tele.numpy(), 'speed': speed.numpy()})
     with torch.no_grad():
-        want = [t.numpy() for t in model(image, speed)]
+        want = [t.numpy() for t in model(image, tele, speed)]
     worst = max(float(np.abs(a - b).max()) for a, b in zip(got, want))
     if worst > 1e-3:
         raise SystemExit(f'ONNX output differs from PyTorch by {worst}')
 
     meta = {
-        'inputs': {'image': [1, 3, h, w], 'speed': [1, 1]},
+        'inputs': {'image': [1, 3, h, w], 'tele': [1, 3, h, w], 'speed': [1, 1]},
         'image': 'RGB, float in [0, 1], rows top to bottom (the roof camera, see src/sensor.js)',
+        'tele': 'the traffic-light camera, same format (src/sensor.js TELE)',
+        'lights': LIGHTS,
         'speed_units': 'm/s',
         'outputs': OUTPUTS,
         'commands': COMMANDS,
