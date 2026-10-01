@@ -115,3 +115,13 @@ test('neural driver: perfect waypoint predictions drive with (almost) no takeove
   }
   assert.ok(takeovers.length <= 1, `takeovers over ~1.9 km: ${JSON.stringify(takeovers)}`);
 });
+
+test('safety driver: takes over from a policy that will not pull away, and the car then moves', () => {
+  const w = world(6);
+  w.setPolicy({ control: (_, exp) => ({ steer: exp.steer, throttle: -0.5 }) });
+  for (let t = 0; t < 60 * 60; t++) w.step(1 / 60);
+  const stalls = w.safety.events.filter((e) => e.reason === 'did not pull away').length;
+  assert.ok(stalls >= 3, `stall takeovers: ${stalls}`);
+  assert.ok(w.safety.totalDist > 40, `the expert drove during takeovers: ${w.safety.totalDist.toFixed(0)} m`);
+  assert.equal(w.contacts, 0);
+});
