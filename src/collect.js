@@ -1,5 +1,6 @@
 // Training-data collection, streamed to the dev server (scripts/serve.py writes data/<run>/):
 //   frames/NNNNNN.jpg   roof camera (what the network sees)
+//   tele/NNNNNN.jpg     traffic-light camera (narrow, looking up the road)
 //   labels/NNNNNN.png   semantic class (R) and depth (G) of the same view
 //   samples.jsonl       one line per frame: command, waypoints for every command branch, target
 //                       speed, and what was actually applied (see labels.js)
@@ -64,14 +65,15 @@ export class Collector {
     this.rows = [];
   }
 
-  // rgb: the ImageData already rendered for this instant. info: {weather, hour, scenario}.
+  // rgb, tele: the camera images already rendered for this instant. info: {weather, hour, scenario}.
   // Returns whether a sample was taken (none while a human drives: no expert labels).
-  capture(world, rgb, info) {
+  capture(world, rgb, info, tele = null) {
     if (!this.active || world.manual || !world.expertCtrl) return false;
     const n = ++this.count, id = String(n).padStart(6, '0');
     const lab = makeLabels(world, world.expertCtrl);
     const c = world.ctrl ?? world.expertCtrl;
     this.sendBlob(`frames/${id}.jpg`, this.rig.encode(rgb, 'image/jpeg', 0.92));
+    if (tele) this.sendBlob(`tele/${id}.jpg`, this.rig.encode(tele, 'image/jpeg', 0.95));
     this.sendBlob(`labels/${id}.png`, this.rig.encode(this.rig.renderLabels(world.car), 'image/png'));
     const r2 = (v) => Math.round(v * 100) / 100;
     this.rows.push({
@@ -80,7 +82,7 @@ export class Collector {
       v_target: r2(lab.vTarget), acc: r2(world.expertCtrl.acc), reason: world.expertCtrl.reason ?? null, overtaking: lab.overtaking,
       steer: r2(c.steer), throttle: r2(c.throttle), driver: c.driver ?? 'expert', noise: r2(c.noise ?? 0),
       weather: info.weather, hour: r2(info.hour), scenario: info.scenario || null, road: lab.road, lane: lab.lane,
-      labels: LABEL_VERSION, wp_scale: r2(lab.wpScale),
+      labels: LABEL_VERSION, wp_scale: r2(lab.wpScale), light: lab.light,
     });
     if (this.rows.length >= FLUSH_EVERY) this.flush();
     return true;

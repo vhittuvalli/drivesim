@@ -521,8 +521,10 @@ function sensorFrame() {
   if (!wantNN && !wantData) return;
   city.setSignalColors((n, a) => world.signals.state(n, a)); // the lamps must match this instant
   const rgb = rig.renderRGB(car);
-  if (wantNN) neural.observe(world, rgb);
-  if (wantData) collectSession.captured(collector.capture(world, rgb, { weather: settings.weather, hour: settings.hour, scenario: settings.scenario }));
+  // The traffic-light camera, for collection and for networks that take it as an input.
+  const tele = wantData || neural.usesTele ? rig.renderTele(car) : null;
+  if (wantNN) neural.observe(world, rgb, tele);
+  if (wantData) collectSession.captured(collector.capture(world, rgb, { weather: settings.weather, hour: settings.hour, scenario: settings.scenario }, tele));
 }
 
 async function setNeural(on) {
@@ -722,7 +724,7 @@ window.addEventListener('keydown', (e) => {
   else if (key === 'h') setControlsVisible($('controls').hidden);
 });
 
-window.__dbg = { scene, sun, renderer, camera, cityUniforms, get orbit() { return orbit; }, get world() { return world; }, get neural() { return neural; }, get bench() { return bench; }, get collect() { return collectSession; } };
+window.__dbg = { scene, sun, renderer, camera, cityUniforms, get orbit() { return orbit; }, get world() { return world; }, get neural() { return neural; }, get rig() { return rig; }, get bench() { return bench; }, get collect() { return collectSession; } };
 init().catch((err) => {
   console.error(err);
   setLoading(`Failed to start: ${err.message}`);
