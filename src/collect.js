@@ -82,7 +82,7 @@ export class Collector {
       v_target: r2(lab.vTarget), acc: r2(world.expertCtrl.acc), reason: world.expertCtrl.reason ?? null, overtaking: lab.overtaking,
       steer: r2(c.steer), throttle: r2(c.throttle), driver: c.driver ?? 'expert', noise: r2(c.noise ?? 0),
       weather: info.weather, hour: r2(info.hour), scenario: info.scenario || null, road: lab.road, lane: lab.lane,
-      labels: LABEL_VERSION, wp_scale: r2(lab.wpScale), light: lab.light,
+      labels: LABEL_VERSION, wp_scale: r2(lab.wpScale), light: lab.light, lead_gap: r2(lab.lead.gap), lead_v: r2(lab.lead.v),
     });
     if (this.rows.length >= FLUSH_EVERY) this.flush();
     return true;

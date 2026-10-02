@@ -165,3 +165,18 @@ test('light-aware speed: brakes to stop at the predicted line for red, not for g
   nn.lightAware = false;
   assert.ok(nn.control({ car: { x: 0, z: 0, h: 0, v: 10 } }).throttle > 0, 'without the cap it would drive on');
 });
+
+test('labels: the lead obstacle is the one the expert brakes for, clear road is far', () => {
+  const w = world(4, { cars: 90 });
+  let following = 0, clear = 0;
+  for (let t = 0; t < 90 * 60; t++) {
+    w.step(1 / 60);
+    if (t % 15) continue;
+    const L = makeLabels(w, w.expertCtrl), lead = w.expertCtrl.lead;
+    assert.ok(L.lead.gap >= 0 && L.lead.gap <= 80 && L.lead.v >= 0);
+    if (lead && lead.gap < 80) (following++), assert.ok(Math.abs(L.lead.gap - lead.gap) < 1e-9);
+    else (clear++), assert.equal(L.lead.gap, 80);
+    if (w.expertCtrl.reason === 'vehicle') assert.ok(L.lead.gap < 80, 'braking for a vehicle means a lead within range');
+  }
+  assert.ok(following > 20 && clear > 20, `following ${following}, clear ${clear}`);
+});

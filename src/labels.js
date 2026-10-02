@@ -20,12 +20,24 @@ export const WP_DIST = [2, 4, 6, 8, 11, 14, 18, 23]; // meters along the path fr
 export const WP_SCALE_SPEED = 12; // m/s
 export const wpScale = (v) => Math.max(1, v / WP_SCALE_SPEED);
 // Samples carry this; training drops version-1 rows above WP_SCALE_SPEED (fixed spacing).
-export const LABEL_VERSION = 3; // 3: light label and the traffic-light camera frame
+export const LABEL_VERSION = 4; // 3: light label and the traffic-light camera frame; 4: lead obstacle
 export const COMMANDS = ['left', 'straight', 'right'];
 // The signal for our approach, as an auxiliary target that teaches the network to look at it:
 // 'none' when there is no stop line within LIGHT_RANGE (or we're past it).
 export const LIGHTS = ['none', 'red', 'yellow', 'green'];
 export const LIGHT_RANGE = 90; // m, the expert's signal horizon (planner.signalObstacle)
+
+// The obstacle the expert is following or stopping for (a vehicle or pedestrian on its path, or one
+// about to cross it): front-bumper gap, including the room it leaves behind a stalled vehicle, and
+// its speed along the path. With nothing within LEAD_FAR the road counts as clear: the gap is
+// LEAD_FAR and the "lead" moves at our own speed.
+export const LEAD_FAR = 80; // m
+
+export function leadOf(exp, v) {
+  const L = exp.lead;
+  if (!L || !(L.gap < LEAD_FAR)) return { gap: LEAD_FAR, v };
+  return { gap: Math.max(0, L.gap), v: L.v };
+}
 
 export function lightOf(exp) {
   const st = exp.signal;
@@ -95,6 +107,7 @@ export function makeLabels(world, exp) {
   const cmd = commandOf(route, s);
   const vTarget = Math.min(MAX_TARGET_SPEED, Math.max(0, car.v + exp.acc * TARGET_HORIZON));
   const scale = wpScale(car.v);
+  const lead = leadOf(exp, car.v);
   if (route.highway) {
     const taken = pathWaypoints(route, s, car, null, expert.k, scale);
     const wp = { left: null, straight: null, right: null };
@@ -105,7 +118,7 @@ export function makeLabels(world, exp) {
       wp.left = laneChangeWaypoints(route, q, car, lane, lane - 1, car.v);
       wp.right = laneChangeWaypoints(route, q, car, lane, lane + 1, car.v);
     }
-    return { command: cmd.kind, cmdDist: null, wp, vTarget, overtaking: false, road: 'highway', lane, wpScale: scale, light: 'none' };
+    return { command: cmd.kind, cmdDist: null, wp, vTarget, overtaking: false, road: 'highway', lane, wpScale: scale, light: 'none', lead };
   }
   const overtaking = !!expert.ot.active;
   const taken = pathWaypoints(route, s, car, overtaking ? expert.ot.offsetAt : null, expert.k, scale);
@@ -117,5 +130,5 @@ export function makeLabels(world, exp) {
     // Far from the intersection every branch just follows the lane.
     wp[kind] = cmd.dist > horizon ? taken : branchWaypoints(car, kind, scale);
   }
-  return { command: cmd.kind, cmdDist: Number.isFinite(cmd.dist) ? cmd.dist : null, wp, vTarget, overtaking, road: 'city', lane: null, wpScale: scale, light: lightOf(exp) };
+  return { command: cmd.kind, cmdDist: Number.isFinite(cmd.dist) ? cmd.dist : null, wp, vTarget, overtaking, road: 'city', lane: null, wpScale: scale, light: lightOf(exp), lead };
 }
