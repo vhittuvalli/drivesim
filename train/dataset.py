@@ -26,6 +26,22 @@ LIGHT_READABLE = 50.0  # m to the intersection
 IGNORE = -100
 
 
+HALF_LEN = 2.35  # car center to front bumper (src/planner.js)
+
+
+STOP_FAR = 60.0  # stop-line distances beyond this are labeled as this: "far away"
+
+
+def stop_target(r):
+    """Front bumper to the stop line of the signal ahead (cmd_dist is from the car center), capped
+    at STOP_FAR, and whether it is labeled. Far signals are labeled too (as STOP_FAR): unlabeled,
+    the head answered anything there, including "right here" for a light 80 m away."""
+    d = r.get('cmd_dist')
+    if r['light'] == 'none' or d is None or r.get('road') == 'highway':
+        return 0.0, 0.0
+    return min(max(0.0, d - HALF_LEN), STOP_FAR), 1.0
+
+
 def light_target(r):
     if r['light'] != 'none' and r.get('cmd_dist') is not None and r['cmd_dist'] > LIGHT_READABLE:
         return IGNORE
@@ -137,6 +153,8 @@ class DriveDataset(Dataset):
             'image': torch.from_numpy(img).permute(2, 0, 1),  # uint8 CHW
             'tele': torch.from_numpy(tele).permute(2, 0, 1),
             'light': torch.tensor(light_target(r)),
+            'stop': torch.tensor(stop_target(r)[0], dtype=torch.float32),
+            'stop_mask': torch.tensor(stop_target(r)[1], dtype=torch.float32),
             'speed': torch.tensor([max(0.0, v)], dtype=torch.float32),
             'wp': torch.from_numpy(wp),
             'wp_mask': torch.from_numpy(mask),

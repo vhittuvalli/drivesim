@@ -51,7 +51,7 @@ def augment(img):
 def evaluate(model, loader, device):
     model.eval()
     sums, n = {}, 0
-    counts = {'light': [0, 0], 'signal': [0, 0]}
+    counts = {'light': [0, 0], 'signal': [0, 0], 'stop': [0, 0]}
     for batch in loader:
         batch = {k: v.to(device) for k, v in batch.items()}
         pred = model(batch['image'].float() / 255, batch['tele'].float() / 255, batch['speed'])
@@ -61,6 +61,8 @@ def evaluate(model, loader, device):
         target = batch['wp'][torch.arange(len(wp)), batch['cmd']]
         parts['lateral_at_8m'] = (taken[:, 3, 1] - target[:, 3, 1]).abs().mean().item()
         parts['seg_acc'] = (pred[2].argmax(1) == batch['seg']).float().mean().item()
+        sm = batch['stop_mask'] > 0
+        counts['stop'] = [counts['stop'][0] + float((pred[5][sm] - batch['stop'][sm]).abs().sum()), counts['stop'][1] + int(sm.sum())]
         # Light accuracy as counts: per-batch means would score batches with no signal in view
         # (a highway stretch) as 0%.
         hit = pred[4].argmax(1) == batch['light']
@@ -73,7 +75,7 @@ def evaluate(model, loader, device):
         n += k
     model.train()
     out = {k: v / max(n, 1) for k, v in sums.items()}
-    out['light_acc'], out['signal_acc'] = (c / max(t, 1) for c, t in (counts['light'], counts['signal']))
+    out['light_acc'], out['signal_acc'], out['stop_err'] = (c / max(t, 1) for c, t in (counts['light'], counts['signal'], counts['stop']))
     return out
 
 
@@ -109,7 +111,9 @@ def main():
 
     model = Policy().to(device)
     if a.init:
-        model.load_state_dict(torch.load(a.init, map_location='cpu')['model'])
+        missing, _ = model.load_state_dict(torch.load(a.init, map_location='cpu')['model'], strict=False)
+        if missing:
+            print(f'new layers (not in {a.init}): {sorted({k.split(".")[0] for k in missing})}')
         print(f'fine-tuning from {a.init}')
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=1e-4)
     steps = a.epochs * len(train_dl)
@@ -138,7 +142,7 @@ def main():
             torch.save({'model': model.state_dict(), 'epoch': epoch, 'metrics': m}, a.out + '.pt')
         print(
             f'epoch {epoch:2d}  train {run_loss / len(train_dl):.3f}  val wp {m["wp"]:.3f} m  lateral@8m {m["lateral_at_8m"]:.2f} m  '
-            f'speed {m["speed"]:.2f} m/s  light acc {m["light_acc"]:.1%} (at signals within 50 m {m["signal_acc"]:.1%})  seg acc {m["seg_acc"]:.1%}  depth {m["depth"]:.3f}  ({time.time() - t0:.0f}s){tag}'
+            f'speed {m["speed"]:.2f} m/s  light acc {m["light_acc"]:.1%} (at signals within 50 m {m["signal_acc"]:.1%})  stop line ±{m["stop_err"]:.1f} m  seg acc {m["seg_acc"]:.1%}  depth {m["depth"]:.3f}  ({time.time() - t0:.0f}s){tag}'
         )
 
     ck = torch.load(a.out + '.pt', map_location='cpu')

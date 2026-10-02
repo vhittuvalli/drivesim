@@ -43,7 +43,10 @@ export class SafetyDriver {
     if (Math.abs(angleWrap(car.h - pathH)) > this.maxHeading) return 'wrong heading';
     // Stopped at a green light or behind nothing: a learned driver can latch onto its own zero
     // speed and never pull away, which none of the other checks would notice.
-    const stall = exp.acc > 0.5 && car.v < 0.5 && nn.throttle < 0.05;
+    // Not while the expert is itself held by a light, a yield or a blocked box: then it is only
+    // creeping up to the line, and staying put is fine.
+    const held = exp.reason === 'signal' || exp.reason === 'yield' || exp.reason === 'box';
+    const stall = !held && exp.acc > 0.5 && car.v < 0.5 && nn.throttle < 0.05;
     this.stalled = stall ? this.stalled + dt : 0;
     if (this.stalled > this.stallGrace) return 'did not pull away';
     const under = exp.acc < this.brakeDemand && car.v > 1 && nn.throttle > exp.throttle + 0.35;

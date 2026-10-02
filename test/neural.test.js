@@ -141,3 +141,27 @@ test('labels: the light ahead is labeled red, yellow or green near a stop line, 
   }
   assert.ok(seen.has('red') && seen.has('green') && seen.has('none'), [...seen].join());
 });
+
+test('light-aware speed: brakes to stop at the predicted line for red, not for green or far away', async () => {
+  const { lightCap, NeuralDriver } = await import('../src/neural.js');
+  // 10 m/s, red light, line 20 m ahead: brake at about v^2 / 2(d - 1).
+  const a = lightCap(10, 20, 0.95, 0.02);
+  assert.ok(a < -2 && a > -3, `decel ${a}`);
+  assert.equal(lightCap(10, 20, 0.05, 0.02), null, 'green: no cap');
+  assert.equal(lightCap(10, 80, 0.95, 0.02), null, 'beyond range: no cap');
+  assert.ok(lightCap(10, 45, 0.95, 0.02) === 0 || lightCap(10, 45, 0.95, 0.02) < 0, 'far: at least no speeding up');
+  assert.equal(lightCap(15, 8, 0.02, 0.95), null, 'amber too close to stop for: go through');
+  assert.ok(lightCap(8, 30, 0.02, 0.95) <= 0, 'amber with room: stop');
+  // Through the driver: a confident red with the line 15 m ahead brakes even though the
+  // network's own target speed says keep going; a stopped car holds the brake at the line.
+  const nn = new NeuralDriver();
+  const pose = { x: 0, z: 0, h: 0 }, straight = [2, 4, 6, 8, 11, 14, 18, 23].map((d) => [d, 0]);
+  const red = { none: 0.02, red: 0.95, yellow: 0.01, green: 0.02 };
+  for (let i = 0; i < 3; i++) nn.setPrediction(pose, 'straight', [straight, straight, straight], [10, 10, 10], { light: red, stopDist: 15 });
+  const moving = nn.control({ car: { x: 0, z: 0, h: 0, v: 10 } });
+  assert.ok(moving.throttle < -0.2 && moving.lightStop, JSON.stringify(moving));
+  const stopped = nn.control({ car: { x: 13.5, z: 0, h: 0, v: 0.2 } });
+  assert.equal(stopped.throttle, -0.5, 'holds the brake at the line');
+  nn.lightAware = false;
+  assert.ok(nn.control({ car: { x: 0, z: 0, h: 0, v: 10 } }).throttle > 0, 'without the cap it would drive on');
+});
