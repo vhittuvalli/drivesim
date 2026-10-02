@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dataset import COMMANDS, LIGHTS  # noqa: E402
 from model import IMAGE_SIZE, N_WP, Policy  # noqa: E402
 
-OUTPUTS = ['waypoints', 'v_target', 'seg', 'depth', 'light', 'attention']
+OUTPUTS = ['waypoints', 'v_target', 'seg', 'depth', 'light', 'stop_dist', 'attention']
 WP_DIST = [2, 4, 6, 8, 11, 14, 18, 23]  # must match src/labels.js
 CLASSES = ['sky', 'road', 'marking', 'sidewalk', 'building', 'vegetation', 'pole', 'traffic light', 'vehicle', 'pedestrian', 'terrain']
 

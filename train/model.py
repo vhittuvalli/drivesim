@@ -13,6 +13,7 @@ a green one looked the same.
 Auxiliary outputs, used for training signal and visualization:
   seg, depth   coarse semantic segmentation and depth (64x32) from a small decoder
   light        the state of the signal ahead (none / red / yellow / green), from both cameras
+  stop_dist    distance from the front bumper to that signal's stop line (meters)
   attention    VisualBackProp-style map of which image regions the trunk responds to
 """
 import torch
@@ -52,6 +53,7 @@ class Policy(nn.Module):
             nn.Sequential(nn.Linear(256 + 128 + 32, 128), nn.ReLU(inplace=True), nn.Linear(128, N_WP * 2 + 1)) for _ in range(N_CMD)
         )
         self.light = nn.Linear(256 + 128, N_LIGHTS)
+        self.stop = nn.Linear(256 + 128, 1)
         self.dec = block(64, 24, 3, 1)
         self.fuse = block(24 + 36, 24, 1, 1)
         self.seg = nn.Conv2d(24, N_CLASSES, 1)
@@ -60,7 +62,8 @@ class Policy(nn.Module):
     def forward(self, image, tele, speed):
         """image, tele: (B, 3, 128, 256) float in [0, 1]; speed: (B, 1) m/s.
         Returns waypoints (B, 3, 8, 2) meters, target speed (B, 3) m/s, seg logits (B, 11, 32, 64),
-        depth (B, 1, 32, 64) in [0, 1], light logits (B, 4), attention (B, 1, 32, 64) in [0, 1]."""
+        depth (B, 1, 32, 64) in [0, 1], light logits (B, 4), stop-line distance (B,) meters,
+        attention (B, 1, 32, 64) in [0, 1]."""
         x = (image - self.mean) / self.std
         f1 = self.c1(x)
         f2 = self.c2(f1)
@@ -71,6 +74,7 @@ class Policy(nn.Module):
 
         vis = torch.cat([self.fc(f6), self.tele((tele - self.mean) / self.std)], 1)
         light = self.light(vis)
+        stop_dist = F.softplus(self.stop(vis)[:, 0]) * 10.0
         z = torch.cat([vis, self.speed_fc(speed / SPEED_SCALE)], 1)
         out = torch.stack([h(z) for h in self.heads], 1)  # (B, 3, 17)
         wp = out[..., : N_WP * 2].reshape(-1, N_CMD, N_WP, 2) * WP_SCALE
@@ -89,12 +93,12 @@ class Policy(nn.Module):
         lo = m.amin(dim=(2, 3), keepdim=True)
         hi = m.amax(dim=(2, 3), keepdim=True)
         attention = (m - lo) / (hi - lo + 1e-6)
-        return wp, v_target, seg, depth, light, attention
+        return wp, v_target, seg, depth, light, stop_dist, attention
 
 
-def losses(pred, batch, w_speed=0.5, w_seg=0.2, w_depth=2.0, w_light=1.0):
+def losses(pred, batch, w_speed=0.5, w_seg=0.2, w_depth=2.0, w_light=1.0, w_stop=0.05):
     """Masked L1 on every labelled branch, L1 on the taken branch's target speed, and the aux terms."""
-    wp, v_target, seg, depth, light, _ = pred
+    wp, v_target, seg, depth, light, stop_dist, _ = pred
     mask = batch['wp_mask'][:, :, None, None]
     # Nearer waypoints matter most for control: weight them up.
     near = torch.linspace(1.5, 0.7, N_WP, device=wp.device)[None, None, :, None]
@@ -104,5 +108,7 @@ def losses(pred, batch, w_speed=0.5, w_seg=0.2, w_depth=2.0, w_light=1.0):
     l_seg = F.cross_entropy(seg, batch['seg'])
     l_depth = (depth[:, 0] - batch['depth']).abs().mean()
     l_light = F.cross_entropy(light, batch['light'], ignore_index=-100) if (batch['light'] >= 0).any() else light.sum() * 0
-    total = l_wp + w_speed * l_speed + w_seg * l_seg + w_depth * l_depth + w_light * l_light
-    return total, {'wp': l_wp.item(), 'speed': l_speed.item(), 'seg': l_seg.item(), 'depth': l_depth.item(), 'light': l_light.item()}
+    sm = batch['stop_mask']
+    l_stop = ((stop_dist - batch['stop']).abs() * sm).sum() / sm.sum().clamp(min=1)
+    total = l_wp + w_speed * l_speed + w_seg * l_seg + w_depth * l_depth + w_light * l_light + w_stop * l_stop
+    return total, {'wp': l_wp.item(), 'speed': l_speed.item(), 'seg': l_seg.item(), 'depth': l_depth.item(), 'light': l_light.item(), 'stop': l_stop.item()}

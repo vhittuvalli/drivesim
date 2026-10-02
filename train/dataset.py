@@ -26,6 +26,18 @@ LIGHT_READABLE = 50.0  # m to the intersection
 IGNORE = -100
 
 
+HALF_LEN = 2.35  # car center to front bumper (src/planner.js)
+
+
+def stop_target(r):
+    """Front bumper to the stop line of the signal ahead (cmd_dist is from the car center), and
+    whether it is labeled: only near a signal, where the light is readable."""
+    d = r.get('cmd_dist')
+    if r['light'] == 'none' or d is None or d > LIGHT_READABLE or r.get('road') == 'highway':
+        return 0.0, 0.0
+    return max(0.0, d - HALF_LEN), 1.0
+
+
 def light_target(r):
     if r['light'] != 'none' and r.get('cmd_dist') is not None and r['cmd_dist'] > LIGHT_READABLE:
         return IGNORE
@@ -137,6 +149,8 @@ class DriveDataset(Dataset):
             'image': torch.from_numpy(img).permute(2, 0, 1),  # uint8 CHW
             'tele': torch.from_numpy(tele).permute(2, 0, 1),
             'light': torch.tensor(light_target(r)),
+            'stop': torch.tensor(stop_target(r)[0], dtype=torch.float32),
+            'stop_mask': torch.tensor(stop_target(r)[1], dtype=torch.float32),
             'speed': torch.tensor([max(0.0, v)], dtype=torch.float32),
             'wp': torch.from_numpy(wp),
             'wp_mask': torch.from_numpy(mask),
