@@ -29,13 +29,17 @@ IGNORE = -100
 HALF_LEN = 2.35  # car center to front bumper (src/planner.js)
 
 
+STOP_FAR = 60.0  # stop-line distances beyond this are labeled as this: "far away"
+
+
 def stop_target(r):
-    """Front bumper to the stop line of the signal ahead (cmd_dist is from the car center), and
-    whether it is labeled: only near a signal, where the light is readable."""
+    """Front bumper to the stop line of the signal ahead (cmd_dist is from the car center), capped
+    at STOP_FAR, and whether it is labeled. Far signals are labeled too (as STOP_FAR): unlabeled,
+    the head answered anything there, including "right here" for a light 80 m away."""
     d = r.get('cmd_dist')
-    if r['light'] == 'none' or d is None or d > LIGHT_READABLE or r.get('road') == 'highway':
+    if r['light'] == 'none' or d is None or r.get('road') == 'highway':
         return 0.0, 0.0
-    return max(0.0, d - HALF_LEN), 1.0
+    return min(max(0.0, d - HALF_LEN), STOP_FAR), 1.0
 
 
 def light_target(r):
