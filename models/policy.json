@@ -6,18 +6,33 @@
       128,
       256
     ],
+    "tele": [
+      1,
+      3,
+      128,
+      256
+    ],
     "speed": [
       1,
       1
     ]
   },
   "image": "RGB, float in [0, 1], rows top to bottom (the roof camera, see src/sensor.js)",
+  "tele": "the traffic-light camera, same format (src/sensor.js TELE)",
+  "lights": [
+    "none",
+    "red",
+    "yellow",
+    "green"
+  ],
   "speed_units": "m/s",
   "outputs": [
     "waypoints",
     "v_target",
     "seg",
     "depth",
+    "light",
+    "stop_dist",
     "attention"
   ],
   "commands": [
@@ -51,22 +66,28 @@
     "terrain"
   ],
   "depth_range": 100,
-  "onnx_check_max_abs_diff": 1.0728836059570312e-05,
-  "trained": "2026-09-30T22:25:38+00:00",
-  "frames": 67241,
-  "runs": 136,
+  "onnx_check_max_abs_diff": 9.5367431640625e-06,
+  "trained": "2026-10-02T06:36:01+00:00",
+  "frames": 70547,
+  "runs": 147,
   "drivers": {
-    "expert": 67227,
-    "neural": 14
+    "expert": 48236,
+    "neural": 17889,
+    "safety": 4422
   },
   "epoch": 6,
   "val": {
-    "wp": 0.0763,
-    "speed": 0.2789,
-    "seg": 0.2517,
-    "depth": 0.0252,
-    "lateral_at_8m": 0.0929,
-    "seg_acc": 0.9156
+    "wp": 0.1065,
+    "speed": 0.2783,
+    "seg": 0.2614,
+    "depth": 0.0274,
+    "light": 0.3138,
+    "stop": 1.3071,
+    "lateral_at_8m": 0.1325,
+    "seg_acc": 0.914,
+    "light_acc": 0.9525,
+    "signal_acc": 0.9174,
+    "stop_err": 1.9459
   },
   "init": "models/policy.pt"
 }
