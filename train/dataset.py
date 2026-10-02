@@ -124,6 +124,8 @@ def sample_weight(r):
         w *= 4
     if r['v_target'] < r['v'] - 2:  # braking hard
         w *= 1.5
+    if r.get('lead_gap', 80) < 30:  # an obstacle close ahead: the lead output's important cases
+        w *= 2
     if r.get('overtaking'):
         w *= 2
     return w
