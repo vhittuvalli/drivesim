@@ -111,6 +111,7 @@ export class NeuralView {
     $('nn-info').textContent = [
       p ? `cmd ${p.cmd}` : null,
       light ? `light ${light[0]} ${(light[1] * 100).toFixed(0)}%` : null,
+      c?.nn?.lightStop ? 'stopping for the light' : null,
       p ? `target ${(p.vTarget[p.cmdIndex] * 3.6).toFixed(0)} km/h` : null,
       neural.inferMs ? `${neural.inferMs.toFixed(0)} ms` : null,
       last && world.t - last.t < 6 ? `took over: ${last.reason}` : null,
