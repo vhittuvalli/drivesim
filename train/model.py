@@ -6,6 +6,10 @@ output head per navigation command (left / straight / right at the next intersec
 heads are trained on every frame where the expert can label them (see src/labels.js); at run
 time the route's command picks the head.
 
+Two moments of the main camera: the current frame and the one PAST_DT (0.3 s) earlier go through
+the same trunk, and the heads see the current features plus their change. A single frame can't
+show that the car ahead is getting closer, and the network braked late for that reason.
+
 The traffic-light camera (a narrow view up the road, see src/sensor.js) has its own small
 encoder: in the main camera a signal lamp is about a pixel, so a stopped car at a red light and at
 a green one looked the same.
@@ -46,7 +50,8 @@ class Policy(nn.Module):
         self.c4 = block(48, 64, 3, 1)  # 16x32
         self.c5 = block(64, 96, 3, 2)  # 8x16
         self.c6 = block(96, 64, 3, 2)  # 4x8
-        self.fc = nn.Sequential(nn.Flatten(), nn.Linear(64 * 4 * 8, 256), nn.ReLU(inplace=True), nn.Dropout(0.3))
+        # Current trunk features and their change since the past frame.
+        self.fc = nn.Sequential(nn.Flatten(), nn.Linear(64 * 4 * 8 * 2, 256), nn.ReLU(inplace=True), nn.Dropout(0.3))
         # Traffic-light camera: a lighter trunk; lamps are small, so keep the first stride-2 layer
         # narrow but don't pool them away before they have a few channels.
         self.tele = nn.Sequential(
@@ -67,20 +72,23 @@ class Policy(nn.Module):
         self.seg = nn.Conv2d(24, N_CLASSES, 1)
         self.depth = nn.Conv2d(24, 1, 1)
 
-    def forward(self, image, tele, speed):
-        """image, tele: (B, 3, 128, 256) float in [0, 1]; speed: (B, 1) m/s.
-        Returns waypoints (B, 3, 8, 2) meters, target speed (B, 3) m/s, seg logits (B, 11, 32, 64),
-        depth (B, 1, 32, 64) in [0, 1], light logits (B, 4), stop-line distance (B,) meters,
-        lead (B, 2) gap meters and speed m/s, attention (B, 1, 32, 64) in [0, 1]."""
-        x = (image - self.mean) / self.std
-        f1 = self.c1(x)
+    def trunk(self, x):
+        f1 = self.c1((x - self.mean) / self.std)
         f2 = self.c2(f1)
         f3 = self.c3(f2)
         f4 = self.c4(f3)
         f5 = self.c5(f4)
-        f6 = self.c6(f5)
+        return f2, f3, f4, f5, self.c6(f5)
 
-        vis = torch.cat([self.fc(f6), self.tele((tele - self.mean) / self.std)], 1)
+    def forward(self, image, tele, speed, past=None):
+        """image, tele, past: (B, 3, 128, 256) float in [0, 1] (past: the main camera 0.3 s earlier;
+        the current frame if omitted); speed: (B, 1) m/s.
+        Returns waypoints (B, 3, 8, 2) meters, target speed (B, 3) m/s, seg logits (B, 11, 32, 64),
+        depth (B, 1, 32, 64) in [0, 1], light logits (B, 4), stop-line distance (B,) meters,
+        lead (B, 2) gap meters and speed m/s, attention (B, 1, 32, 64) in [0, 1]."""
+        f2, f3, f4, f5, f6 = self.trunk(image)
+        p6 = self.trunk(past)[-1] if past is not None else f6
+        vis = torch.cat([self.fc(torch.cat([f6, f6 - p6], 1)), self.tele((tele - self.mean) / self.std)], 1)
         light = self.light(vis)
         stop_dist = F.softplus(self.stop(vis)[:, 0]) * 10.0
         z = torch.cat([vis, self.speed_fc(speed / SPEED_SCALE)], 1)

@@ -34,18 +34,23 @@ def pick_device(name):
     return torch.device('cpu')
 
 
-def augment(img):
-    """Photometric jitter on a uint8 batch -> float [0, 1]. No geometric changes: they'd break the
-    relationship between image and waypoints."""
-    x = img.float() / 255
-    b = x.shape[0]
-    rnd = lambda lo, hi: torch.empty(b, 1, 1, 1, device=x.device).uniform_(lo, hi)
-    gray = x.mean(1, keepdim=True)
-    x = gray + (x - gray) * rnd(0.6, 1.4)  # saturation
-    x = (x - x.mean((1, 2, 3), keepdim=True)) * rnd(0.7, 1.3) + x.mean((1, 2, 3), keepdim=True)  # contrast
-    x = x * rnd(0.65, 1.35)  # brightness
-    x = x + torch.randn_like(x) * 0.02
-    return x.clamp(0, 1)
+def augment(*imgs):
+    """Photometric jitter on uint8 batches -> float [0, 1], the same jitter for every image of a sample
+    (so the change between the current and past frame is motion, not augmentation). No geometric
+    changes: they'd break the relationship between image and waypoints."""
+    b, dev = imgs[0].shape[0], imgs[0].device
+    rnd = lambda lo, hi: torch.empty(b, 1, 1, 1, device=dev).uniform_(lo, hi)
+    sat, con, bri = rnd(0.6, 1.4), rnd(0.7, 1.3), rnd(0.65, 1.35)
+    out = []
+    for img in imgs:
+        x = img.float() / 255
+        gray = x.mean(1, keepdim=True)
+        x = gray + (x - gray) * sat  # saturation
+        x = (x - x.mean((1, 2, 3), keepdim=True)) * con + x.mean((1, 2, 3), keepdim=True)  # contrast
+        x = x * bri  # brightness
+        x = x + torch.randn_like(x) * 0.02
+        out.append(x.clamp(0, 1))
+    return out if len(out) > 1 else out[0]
 
 
 @torch.no_grad()
@@ -55,7 +60,7 @@ def evaluate(model, loader, device):
     counts = {'light': [0, 0], 'signal': [0, 0], 'stop': [0, 0], 'gap': [0, 0], 'veh': [0, 0]}
     for batch in loader:
         batch = {k: v.to(device) for k, v in batch.items()}
-        pred = model(batch['image'].float() / 255, batch['tele'].float() / 255, batch['speed'])
+        pred = model(batch['image'].float() / 255, batch['tele'].float() / 255, batch['speed'], batch['past'].float() / 255)
         _, parts = losses(pred, batch)
         wp = pred[0]
         taken = wp[torch.arange(len(wp)), batch['cmd']]
@@ -123,7 +128,9 @@ def main():
 
     model = Policy().to(device)
     if a.init:
-        missing, _ = model.load_state_dict(torch.load(a.init, map_location='cpu')['model'], strict=False)
+        own = model.state_dict()
+        init = {k: v for k, v in torch.load(a.init, map_location='cpu')['model'].items() if k in own and own[k].shape == v.shape}
+        missing, _ = model.load_state_dict(init, strict=False)
         if missing:
             print(f'new layers (not in {a.init}): {sorted({k.split(".")[0] for k in missing})}')
         print(f'fine-tuning from {a.init}')
@@ -150,7 +157,8 @@ def main():
         total = 0.0
         for batch in train_dl:
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
-            pred = model(augment(batch['image']), augment(batch['tele']), batch['speed'])
+            image, past = augment(batch['image'], batch['past'])
+            pred = model(image, augment(batch['tele']), batch['speed'], past)
             loss, _ = losses(pred, batch)
             opt.zero_grad(set_to_none=True)
             loss.backward()
