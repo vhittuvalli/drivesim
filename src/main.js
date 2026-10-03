@@ -609,10 +609,14 @@ function benchmarkDone() {
 }
 
 // Progress of automated sessions, read by scripts/headless.mjs.
+// The GPU context can be lost in long headless runs; scripts/headless.mjs restarts the browser.
+let contextLost = false;
+canvas.addEventListener('webglcontextlost', () => (contextLost = true));
+
 window.__status = () => {
   if (!world) return null;
   return {
-    seed, t: world.t, fps: $('fps').textContent, error: collector.error ?? neural.error,
+    seed, t: world.t, contextLost, fps: $('fps').textContent, error: collector.error ?? neural.error,
     model: neural.meta ? { trained: neural.meta.trained, frames: neural.meta.frames, init: neural.meta.init } : null,
     collect: collectSession?.status ?? null,
     bench: bench && { done: bench.done, progress: { index: bench.index, total: bench.items.length }, summary: bench.summary ?? null, results: bench.results },

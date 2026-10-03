@@ -11,9 +11,21 @@ import { makeLabels, LABEL_VERSION } from './labels.js';
 const FLUSH_EVERY = 50;
 const MAX_IN_FLIGHT = 64;
 
-async function post(run, name, body, append = false) {
-  const r = await fetch(`/api/collect?run=${encodeURIComponent(run)}&name=${encodeURIComponent(name)}${append ? '&append=1' : ''}`, { method: 'POST', body });
-  if (!r.ok) throw new Error(`upload ${name}: ${r.status}`);
+// Uploads retry with backoff: under load (several browsers streaming two cameras each) single
+// requests fail with "Failed to fetch" and used to drop ~10% of a run. A retried append that had
+// in fact landed leaves a duplicate row, which the training loader drops.
+async function post(run, name, body, append = false, tries = 4) {
+  const url = `/api/collect?run=${encodeURIComponent(run)}&name=${encodeURIComponent(name)}${append ? '&append=1' : ''}`;
+  for (let i = 0; ; i++) {
+    try {
+      const r = await fetch(url, { method: 'POST', body });
+      if (r.ok) return;
+      if (r.status < 500 || i >= tries - 1) throw new Error(`upload ${name}: ${r.status}`);
+    } catch (e) {
+      if (i >= tries - 1) throw e;
+    }
+    await new Promise((res) => setTimeout(res, 500 * 2 ** i));
+  }
 }
 
 export class Collector {
