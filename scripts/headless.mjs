@@ -27,6 +27,7 @@ const { positionals, values: opt } = parseArgs({
     frames: { type: 'string', default: '5000' },
     noise: { type: 'string', default: '0.5' },
     highway: { type: 'string', default: '0.3' }, // share of collection episodes on the highway
+    dense: { type: 'boolean', default: false }, // heavy traffic in every episode
     neural: { type: 'boolean', default: false },
     parallel: { type: 'string', default: '3' },
     seed: { type: 'string', default: '1' },
@@ -81,7 +82,7 @@ async function collect() {
     return `${c.total ?? 0}/${c.frames} frames · episode ${c.episode} · ${st.fps}${st.error ? ` · ERROR ${st.error}` : ''}`;
   };
   const one = async (seed) => {
-    const q = `seed=${seed}&collect=${opt.frames}&noise=${opt.noise}&hwshare=${opt.highway}&speed=8&fx=0${opt.neural ? '&neural=1' : ''}`;
+    const q = `seed=${seed}&collect=${opt.frames}&noise=${opt.noise}&hwshare=${opt.highway}&speed=8&fx=0${opt.neural ? '&neural=1' : ''}${opt.dense ? '&dense=1' : ''}`;
     const b = await open(q);
     try {
       const st = await watch(b, (s) => s.collect?.done, describe);

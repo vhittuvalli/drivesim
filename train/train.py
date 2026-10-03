@@ -51,7 +51,7 @@ def augment(img):
 def evaluate(model, loader, device):
     model.eval()
     sums, n = {}, 0
-    counts = {'light': [0, 0], 'signal': [0, 0], 'stop': [0, 0]}
+    counts = {'light': [0, 0], 'signal': [0, 0], 'stop': [0, 0], 'gap': [0, 0], 'veh': [0, 0]}
     for batch in loader:
         batch = {k: v.to(device) for k, v in batch.items()}
         pred = model(batch['image'].float() / 255, batch['tele'].float() / 255, batch['speed'])
@@ -61,7 +61,11 @@ def evaluate(model, loader, device):
         target = batch['wp'][torch.arange(len(wp)), batch['cmd']]
         parts['lateral_at_8m'] = (taken[:, 3, 1] - target[:, 3, 1]).abs().mean().item()
         parts['seg_acc'] = (pred[2].argmax(1) == batch['seg']).float().mean().item()
+        veh = batch['seg'] == 8  # recall on vehicle pixels: what the braking depends on
+        counts['veh'] = [counts['veh'][0] + int((pred[2].argmax(1)[veh] == 8).sum()), counts['veh'][1] + int(veh.sum())]
         sm = batch['stop_mask'] > 0
+        lm = (batch['lead_mask'] > 0) & (batch['lead'][:, 0] < 30)  # gap error where it matters: obstacles within 30 m
+        counts['gap'] = [counts['gap'][0] + float((pred[6][lm, 0] - batch['lead'][lm, 0]).abs().sum()), counts['gap'][1] + int(lm.sum())]
         counts['stop'] = [counts['stop'][0] + float((pred[5][sm] - batch['stop'][sm]).abs().sum()), counts['stop'][1] + int(sm.sum())]
         # Light accuracy as counts: per-batch means would score batches with no signal in view
         # (a highway stretch) as 0%.
@@ -75,7 +79,7 @@ def evaluate(model, loader, device):
         n += k
     model.train()
     out = {k: v / max(n, 1) for k, v in sums.items()}
-    out['light_acc'], out['signal_acc'], out['stop_err'] = (c / max(t, 1) for c, t in (counts['light'], counts['signal'], counts['stop']))
+    out['light_acc'], out['signal_acc'], out['stop_err'], out['gap_err'], out['veh_recall'] = (c / max(t, 1) for c, t in (counts['light'], counts['signal'], counts['stop'], counts['gap'], counts['veh']))
     return out
 
 
@@ -142,7 +146,7 @@ def main():
             torch.save({'model': model.state_dict(), 'epoch': epoch, 'metrics': m}, a.out + '.pt')
         print(
             f'epoch {epoch:2d}  train {run_loss / len(train_dl):.3f}  val wp {m["wp"]:.3f} m  lateral@8m {m["lateral_at_8m"]:.2f} m  '
-            f'speed {m["speed"]:.2f} m/s  light acc {m["light_acc"]:.1%} (at signals within 50 m {m["signal_acc"]:.1%})  stop line ±{m["stop_err"]:.1f} m  seg acc {m["seg_acc"]:.1%}  depth {m["depth"]:.3f}  ({time.time() - t0:.0f}s){tag}'
+            f'speed {m["speed"]:.2f} m/s  light acc {m["light_acc"]:.1%} (at signals within 50 m {m["signal_acc"]:.1%})  stop line ±{m["stop_err"]:.1f} m  lead gap (<30 m) ±{m["gap_err"]:.1f} m  vehicle px recall {m["veh_recall"]:.1%}  seg acc {m["seg_acc"]:.1%}  depth {m["depth"]:.3f}  ({time.time() - t0:.0f}s){tag}'
         )
 
     ck = torch.load(a.out + '.pt', map_location='cpu')

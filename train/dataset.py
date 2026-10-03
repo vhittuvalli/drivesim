@@ -42,6 +42,13 @@ def stop_target(r):
     return min(max(0.0, d - HALF_LEN), STOP_FAR), 1.0
 
 
+def lead_target(r):
+    """(gap, speed) of the lead obstacle and whether it is labeled (label version 4 on)."""
+    if 'lead_gap' not in r:
+        return (80.0, r['v']), 0.0
+    return (r['lead_gap'], r['lead_v']), 1.0
+
+
 def light_target(r):
     if r['light'] != 'none' and r.get('cmd_dist') is not None and r['cmd_dist'] > LIGHT_READABLE:
         return IGNORE
@@ -117,6 +124,8 @@ def sample_weight(r):
         w *= 4
     if r['v_target'] < r['v'] - 2:  # braking hard
         w *= 1.5
+    if r.get('lead_gap', 80) < 30:  # an obstacle close ahead: the lead output's important cases
+        w *= 2
     if r.get('overtaking'):
         w *= 2
     return w
@@ -155,6 +164,8 @@ class DriveDataset(Dataset):
             'light': torch.tensor(light_target(r)),
             'stop': torch.tensor(stop_target(r)[0], dtype=torch.float32),
             'stop_mask': torch.tensor(stop_target(r)[1], dtype=torch.float32),
+            'lead': torch.tensor(lead_target(r)[0], dtype=torch.float32),
+            'lead_mask': torch.tensor(lead_target(r)[1], dtype=torch.float32),
             'speed': torch.tensor([max(0.0, v)], dtype=torch.float32),
             'wp': torch.from_numpy(wp),
             'wp_mask': torch.from_numpy(mask),

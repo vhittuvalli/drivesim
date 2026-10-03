@@ -165,3 +165,35 @@ test('light-aware speed: brakes to stop at the predicted line for red, not for g
   nn.lightAware = false;
   assert.ok(nn.control({ car: { x: 0, z: 0, h: 0, v: 10 } }).throttle > 0, 'without the cap it would drive on');
 });
+
+test('labels: the lead obstacle is the one the expert brakes for, clear road is far', () => {
+  const w = world(4, { cars: 90 });
+  let following = 0, clear = 0;
+  for (let t = 0; t < 90 * 60; t++) {
+    w.step(1 / 60);
+    if (t % 15) continue;
+    const L = makeLabels(w, w.expertCtrl), lead = w.expertCtrl.lead;
+    assert.ok(L.lead.gap >= 0 && L.lead.gap <= 80 && L.lead.v >= 0);
+    if (lead && lead.gap < 80) (following++), assert.ok(Math.abs(L.lead.gap - lead.gap) < 1e-9);
+    else (clear++), assert.equal(L.lead.gap, 80);
+    if (w.expertCtrl.reason === 'vehicle') assert.ok(L.lead.gap < 80, 'braking for a vehicle means a lead within range');
+  }
+  assert.ok(following > 20 && clear > 20, `following ${following}, clear ${clear}`);
+});
+
+test('lead-aware braking: IDM toward the predicted obstacle, only when it calls for braking', async () => {
+  const { leadCap, NeuralDriver } = await import('../src/neural.js');
+  assert.equal(leadCap(10, 80, 10, 11), null, 'clear road');
+  assert.equal(leadCap(10, 30, 10, 11), null, 'following at a comfortable gap');
+  assert.ok(leadCap(9, 14, 1.4, 9) < -4, 'closing fast on a nearly stopped car: brake hard');
+  assert.ok(leadCap(26.5, 12, 21, 26.5) < -3, 'cut-in 12 m ahead at highway speed');
+  assert.equal(leadCap(0, 8, 0, 5), null, 'stopped well behind a stopped car: may roll up');
+  assert.ok(leadCap(0.5, 1, 0, 3) < 0, 'too close behind a stopped car: hold');
+  // Through the driver: the network wants to keep 9 m/s, the lead output says a stopped car 14 m ahead.
+  const nn = new NeuralDriver(), pose = { x: 0, z: 0, h: 0 }, straight = [2, 4, 6, 8, 11, 14, 18, 23].map((d) => [d, 0]);
+  nn.setPrediction(pose, 'straight', [straight, straight, straight], [9, 9, 9], { t: 0, lead: { gap: 14, v: 0 } });
+  const c = nn.control({ t: 0.05, car: { x: 0.45, z: 0, h: 0, v: 9 } });
+  assert.ok(c.leadBrake && c.throttle < -0.5, JSON.stringify(c));
+  nn.leadAware = false;
+  assert.ok(nn.control({ t: 0.05, car: { x: 0.45, z: 0, h: 0, v: 9 } }).throttle >= 0, 'without the cap it would keep going');
+});

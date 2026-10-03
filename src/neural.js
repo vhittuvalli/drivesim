@@ -12,8 +12,12 @@
 // speed head didn't reliably act on it. When the network is confident the light is red (or amber
 // with room to stop), acceleration is capped so the car stops just short of the stop line the
 // network predicts, and the brake is held there. Everything the cap uses comes from the network.
-import { clamp, WHEELBASE, MAX_STEER } from './config.js';
-import { throttleFor } from './planner.js';
+//
+// Lead-aware braking, the same idea for traffic: the network's speed head mostly copied the car's
+// own speed and braked late for cars ahead, so networks with a lead output (gap to the obstacle on
+// the path and its speed) get the expert's car-following model (IDM) as a second cap.
+import { clamp, WHEELBASE, MAX_STEER, conditions } from './config.js';
+import { throttleFor, idm, IDM } from './planner.js';
 import { commandOf, toEgo, TARGET_HORIZON, COMMANDS } from './labels.js';
 
 const ORT_VERSION = '1.30.0';
@@ -82,6 +86,19 @@ export function lightCap(v, d, pRed, pYellow, belief = pRed + pYellow) {
   return need > -LIGHT_STOP.comfortDecel ? Math.min(0, need) : need;
 }
 
+export const LEAD = { range: 60, brake: -0.3 };
+
+// Acceleration cap from the predicted obstacle ahead: IDM toward it (with the grip-adjusted
+// parameters every driver uses), applied only when it calls for braking. v0 is what the network
+// would like to drive; a clear road (gap at or beyond range) has no cap.
+export function leadCap(v, gap, leadV, v0) {
+  if (!(gap < LEAD.range)) return null;
+  const g = conditions.grip;
+  const p = g === 1 ? IDM : { ...IDM, T: IDM.T / g, b: IDM.b * g, a: IDM.a * Math.min(1, g * 1.3) };
+  const a = idm(v, Math.max(v0, v + 1, 1), Math.max(gap, 0.05), Math.max(0, leadV), p);
+  return a < LEAD.brake ? a : null;
+}
+
 // ImageData (RGBA, rows top to bottom) -> float32 CHW in [0, 1].
 function toTensorData(img) {
   const n = img.width * img.height, src = img.data, out = new Float32Array(3 * n);
@@ -102,6 +119,7 @@ export class NeuralDriver {
     this.inferMs = 0;
     this.usesTele = false;
     this.lightAware = true; // apply the light-aware speed cap when the network has light outputs
+    this.leadAware = true; // and the lead-aware braking cap when it has a lead output
     this.reset();
   }
 
@@ -173,6 +191,7 @@ export class NeuralDriver {
       this.setPrediction(pose, cmd, branches, Array.from(out.v_target.data), {
         t, v, seg: out.seg.data, segDims: out.seg.dims, attention: out.attention.data, attnDims: out.attention.dims, image: rgb, tele, light,
         stopDist: out.stop_dist ? out.stop_dist.data[0] : null,
+        lead: out.lead ? { gap: out.lead.data[0], v: out.lead.data[1] } : null,
       });
       for (const k of Object.keys(out)) out[k].dispose?.();
       const ms = performance.now() - t0;
@@ -206,12 +225,18 @@ export class NeuralDriver {
     if (!p) return null;
     const car = world.car;
     const pts = this.path.map((q) => toEgo(car, q.x, q.z));
-    let cap = null;
+    const traveled = toEgo(p.pose, car.x, car.z)[0]; // since the observation
+    let light = null, lead = null;
     if (this.lightAware && p.light && p.stopDist !== null && p.stopDist !== undefined) {
-      const d = p.stopDist - toEgo(p.pose, car.x, car.z)[0]; // the line is that much closer now
-      cap = lightCap(car.v, d, p.light.red, p.light.yellow, this.stopBelief);
+      light = lightCap(car.v, p.stopDist - traveled, p.light.red, p.light.yellow, this.stopBelief);
     }
+    if (this.leadAware && p.lead) {
+      // The gap shrinks by our travel and grows by the lead's since the observation.
+      const age = Math.max(0, (world.t ?? p.t ?? 0) - (p.t ?? 0));
+      lead = leadCap(car.v, p.lead.gap - traveled + p.lead.v * age, p.lead.v, p.vTarget[p.cmdIndex]);
+    }
+    const caps = [light, lead].filter((c) => c !== null), cap = caps.length ? Math.min(...caps) : null;
     const out = followPath(pts, car.v, p.vTarget[p.cmdIndex], cap);
-    return { steer: out.steer, throttle: out.throttle, acc: out.acc, cmd: p.cmd, vTarget: p.vTarget[p.cmdIndex], lightStop: cap !== null };
+    return { steer: out.steer, throttle: out.throttle, acc: out.acc, cmd: p.cmd, vTarget: p.vTarget[p.cmdIndex], lightStop: light !== null, leadBrake: lead !== null };
   }
 }
