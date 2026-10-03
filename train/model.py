@@ -22,6 +22,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 N_CMD, N_WP, N_CLASSES, N_LIGHTS = 3, 8, 11, 4
+# Segmentation class weights (classes as in src/labels.js): vehicles and pedestrians are a few
+# percent of the pixels but are what braking depends on; traffic lights are tiny too.
+SEG_WEIGHTS = torch.ones(N_CLASSES)
+SEG_WEIGHTS[7], SEG_WEIGHTS[8], SEG_WEIGHTS[9] = 2.0, 4.0, 4.0
 IMAGE_SIZE = (128, 256)  # H, W (both cameras)
 SPEED_SCALE = 15.0  # m/s
 WP_SCALE = 10.0  # meters per output unit
@@ -56,7 +60,8 @@ class Policy(nn.Module):
         self.light = nn.Linear(256 + 128, N_LIGHTS)
         self.stop = nn.Linear(256 + 128, 1)
         # Lead obstacle: from both cameras and our speed (its speed is easier relative to ours).
-        self.lead = nn.Sequential(nn.Linear(256 + 128 + 32, 64), nn.ReLU(inplace=True), nn.Linear(64, 2))
+        # Dropout: without it the head memorized the training frames' gaps and answered "clear" elsewhere.
+        self.lead = nn.Sequential(nn.Dropout(0.3), nn.Linear(256 + 128 + 32, 64), nn.ReLU(inplace=True), nn.Dropout(0.3), nn.Linear(64, 2))
         self.dec = block(64, 24, 3, 1)
         self.fuse = block(24 + 36, 24, 1, 1)
         self.seg = nn.Conv2d(24, N_CLASSES, 1)
@@ -110,7 +115,7 @@ def losses(pred, batch, w_speed=0.5, w_seg=0.2, w_depth=2.0, w_light=1.0, w_stop
     l_wp = ((wp - batch['wp']).abs() * near * mask).sum() / (mask.sum() * N_WP * 2).clamp(min=1)
     v = v_target.gather(1, batch['cmd'][:, None])[:, 0]
     l_speed = (v - batch['v_target']).abs().mean()
-    l_seg = F.cross_entropy(seg, batch['seg'])
+    l_seg = F.cross_entropy(seg, batch['seg'], weight=SEG_WEIGHTS.to(seg.device))
     l_depth = (depth[:, 0] - batch['depth']).abs().mean()
     l_light = F.cross_entropy(light, batch['light'], ignore_index=-100) if (batch['light'] >= 0).any() else light.sum() * 0
     sm = batch['stop_mask']
