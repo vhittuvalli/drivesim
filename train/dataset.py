@@ -72,12 +72,15 @@ def load_runs(root):
         path = os.path.join(root, run, 'samples.jsonl')
         if not os.path.isfile(path):
             continue
-        rows = []
+        rows, seen = [], set()
         with open(path) as f:
             for line in f:
                 if not line.strip():
                     continue
                 r = json.loads(line)
+                if r['frame'] in seen:  # a retried upload that had landed the first time
+                    continue
+                seen.add(r['frame'])
                 name = f"{r['frame']:06d}"
                 files = [os.path.join(root, run, d, name + ext) for d, ext in (('frames', '.jpg'), ('tele', '.jpg'), ('labels', '.png'))]
                 if usable(r) and 'light' in r and all(os.path.isfile(p) for p in files):

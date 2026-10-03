@@ -145,10 +145,12 @@ without takeovers, meters of autonomous driving per takeover, contacts.
     npm run collect -- --seeds 301,302,303 --frames 5000 --highway 0.8        # mostly highway
     npm run collect -- --seeds 401,402,403 --frames 6000 --dense               # heavy traffic
     npm run train -- --init models/policy.pt --epochs 6                  # fine-tune on all of data/
-    npm run bench -- --seed 1 --out models/bench.json
+    npm run bench -- --seeds 1,2,3 --out models/bench.json               # three cities, combined
 
 `scripts/headless.mjs` runs the app in headless Chrome (set `CHROME=` if it isn't found), one browser per
-city seed. Everything also works from the UI: **Collect**, then `npm run train`, then **Neural** and
+city seed. A browser that loses its GPU context is restarted for the frames still owed, and
+uploads retry. Training saves `models/policy.last.pt` every epoch: `npm run train -- --resume` continues
+an interrupted run, and a data-loader failure after the machine sleeps restarts the epoch. Everything also works from the UI: **Collect**, then `npm run train`, then **Neural** and
 **Benchmark**.
 
 ## Test
