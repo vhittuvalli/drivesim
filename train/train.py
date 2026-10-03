@@ -6,6 +6,7 @@
 Uses the Apple GPU (MPS) or CUDA when available.
 """
 import argparse
+import copy
 import math
 import os
 import sys
@@ -93,6 +94,8 @@ def main():
     ap.add_argument('--workers', type=int, default=4)
     ap.add_argument('--device', default='auto')
     ap.add_argument('--init', default=None, help='checkpoint to start from (DAgger fine-tuning)')
+    ap.add_argument('--resume', action='store_true', help='continue an interrupted run from <out>.last.pt')
+    ap.add_argument('--retries', type=int, default=3, help='restarts of an epoch after a data-loader failure (e.g. after sleep)')
     a = ap.parse_args()
 
     runs = load_runs(a.data)
@@ -110,8 +113,13 @@ def main():
     train_ds = DriveDataset(a.data, train_items, speed_noise=0.3)
     sampler = WeightedRandomSampler([sample_weight(r) for _, r in train_items], num_samples=len(train_items), replacement=True)
     kw = dict(batch_size=a.batch, num_workers=a.workers, persistent_workers=a.workers > 0)
-    train_dl = DataLoader(train_ds, sampler=sampler, drop_last=True, **kw)
-    val_dl = DataLoader(DriveDataset(a.data, val_items), shuffle=False, **kw)
+    val_ds = DriveDataset(a.data, val_items)
+
+    def loaders():
+        # Rebuilt after a failure: worker processes and their shared memory don't survive sleep well.
+        return DataLoader(train_ds, sampler=sampler, drop_last=True, **kw), DataLoader(val_ds, shuffle=False, **kw)
+
+    train_dl, val_dl = loaders()
 
     model = Policy().to(device)
     if a.init:
@@ -125,10 +133,22 @@ def main():
     print(f'training on {device}: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M parameters, {steps} steps')
 
     os.makedirs(os.path.dirname(a.out), exist_ok=True)
-    best, best_metrics = float('inf'), None
-    for epoch in range(1, a.epochs + 1):
-        t0, run_loss = time.time(), 0.0
-        for i, batch in enumerate(train_dl):
+    best, best_metrics, start = float('inf'), None, 1
+    last_path = a.out + '.last.pt'
+    if a.resume:
+        if not os.path.isfile(last_path):
+            raise SystemExit(f'nothing to resume: {last_path} not found')
+        st = torch.load(last_path, map_location='cpu', weights_only=False)
+        model.load_state_dict(st['model'])
+        opt.load_state_dict(st['opt'])
+        sched.load_state_dict(st['sched'])
+        best, best_metrics, start = st['best'], st['best_metrics'], st['epoch'] + 1
+        print(f'resuming after epoch {st["epoch"]} (best score {best:.3f})')
+
+    def train_epoch():
+        model.train()
+        total = 0.0
+        for batch in train_dl:
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
             pred = model(augment(batch['image']), augment(batch['tele']), batch['speed'])
             loss, _ = losses(pred, batch)
@@ -137,13 +157,34 @@ def main():
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             opt.step()
             sched.step()
-            run_loss += loss.item()
-        m = evaluate(model, val_dl, device)
+            total += loss.item()
+        return total
+
+    for epoch in range(start, a.epochs + 1):
+        t0 = time.time()
+        # A data-loader failure (typically "Shared memory manager connection has timed out" after
+        # the machine slept) restarts the epoch from its starting weights instead of ending the run.
+        snap = ({k: v.detach().clone() for k, v in model.state_dict().items()}, copy.deepcopy(opt.state_dict()), copy.deepcopy(sched.state_dict()))
+        for attempt in range(a.retries + 1):
+            try:
+                run_loss = train_epoch()
+                m = evaluate(model, val_dl, device)
+                break
+            except RuntimeError as e:
+                if attempt == a.retries:
+                    raise
+                print(f'epoch {epoch}: data loader failed ({str(e).splitlines()[0]}); restarting the epoch')
+                model.load_state_dict(snap[0])
+                opt.load_state_dict(snap[1])
+                sched.load_state_dict(snap[2])
+                train_dl, val_dl = loaders()
         score = m['wp'] + 0.5 * m['speed']
         tag = ''
         if score < best:
             best, best_metrics, tag = score, m, '  * best'
             torch.save({'model': model.state_dict(), 'epoch': epoch, 'metrics': m}, a.out + '.pt')
+        torch.save({'model': model.state_dict(), 'opt': opt.state_dict(), 'sched': sched.state_dict(), 'epoch': epoch,
+                    'best': best, 'best_metrics': best_metrics}, last_path)
         print(
             f'epoch {epoch:2d}  train {run_loss / len(train_dl):.3f}  val wp {m["wp"]:.3f} m  lateral@8m {m["lateral_at_8m"]:.2f} m  '
             f'speed {m["speed"]:.2f} m/s  light acc {m["light_acc"]:.1%} (at signals within 50 m {m["signal_acc"]:.1%})  stop line ±{m["stop_err"]:.1f} m  lead gap (<30 m) ±{m["gap_err"]:.1f} m  vehicle px recall {m["veh_recall"]:.1%}  seg acc {m["seg_acc"]:.1%}  depth {m["depth"]:.3f}  ({time.time() - t0:.0f}s){tag}'
