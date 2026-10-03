@@ -86,7 +86,7 @@ export function lightCap(v, d, pRed, pYellow, belief = pRed + pYellow) {
   return need > -LIGHT_STOP.comfortDecel ? Math.min(0, need) : need;
 }
 
-export const LEAD = { range: 60, brake: -0.3 };
+export const LEAD = { range: 60, brake: -0.3, maxValErr: 5 }; // maxValErr: m, gap error within 30 m on validation
 
 // Acceleration cap from the predicted obstacle ahead: IDM toward it (with the grip-adjusted
 // parameters every driver uses), applied only when it calls for braking. v0 is what the network
@@ -118,6 +118,7 @@ export class NeuralDriver {
     this.commands = COMMANDS; // order of the network's command branches
     this.inferMs = 0;
     this.usesTele = false;
+    this.pastDt = null;
     this.lightAware = true; // apply the light-aware speed cap when the network has light outputs
     this.leadAware = true; // and the lead-aware braking cap when it has a lead output
     this.reset();
@@ -140,6 +141,10 @@ export class NeuralDriver {
     this.commands = this.meta.commands;
     [, , this.inH, this.inW] = this.meta.inputs.image;
     this.usesTele = !!this.meta.inputs.tele;
+    this.pastDt = this.meta.inputs.past ? this.meta.past_dt ?? 0.3 : null; // seconds; null: single-frame network
+    // Only brake on the lead output if it was accurate on held-out data (it has been off by 15-20 m).
+    const gapErr = this.meta.val?.gap_err;
+    this.leadAware = gapErr !== undefined && gapErr < LEAD.maxValErr;
     return this.meta;
   }
 
@@ -150,6 +155,7 @@ export class NeuralDriver {
     this.nextObs = -Infinity;
     this.error = null;
     this.stopBelief = 0; // smoothed P(red or amber) over observations
+    this.history = []; // {t, image}: recent camera frames, for networks that also see an earlier one
   }
 
   // The simulation must not step past this time without a fresh observation.
@@ -179,6 +185,17 @@ export class NeuralDriver {
         speed: new Tensor('float32', Float32Array.of(v), [1, 1]),
       };
       if (this.usesTele) feeds.tele = new Tensor('float32', toTensorData(tele), [1, 3, ...this.meta.inputs.tele.slice(2)]);
+      if (this.pastDt !== null) {
+        // The frame closest to pastDt ago (observations are 0.1 s apart); the current one at first.
+        let past = rgb, best = 0.06;
+        for (const h of this.history) {
+          const err = Math.abs(t - this.pastDt - h.t);
+          if (err <= best) (best = err), (past = h.image);
+        }
+        feeds.past = new Tensor('float32', toTensorData(past), [1, 3, this.inH, this.inW]);
+        this.history.push({ t, image: rgb });
+        while (this.history.length && this.history[0].t < t - 1) this.history.shift();
+      }
       const out = await this.session.run(feeds);
       // Probabilities for the light ahead (networks trained with the traffic-light camera).
       let light = null;
