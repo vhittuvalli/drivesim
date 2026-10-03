@@ -21,17 +21,17 @@ const weighted = (rand, table) => {
 };
 const stamp = () => new Date().toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '-');
 
-// highway: share of episodes on the highway.
-export function randomConditions(rand, highway = 0.3) {
+// highway: share of episodes on the highway. dense: heavy traffic (more cars close ahead to learn from).
+export function randomConditions(rand, highway = 0.3, dense = false) {
   const night = rand() < 0.22;
   return {
     road: rand() < highway ? 'highway' : 'city',
     weather: weighted(rand, { clear: 0.4, rain: 0.25, fog: 0.15, snow: 0.2 }),
     hour: night ? pick(rand, [4.5 + rand() * 1.5, 19 + rand() * 3]) : 7 + rand() * 11,
-    cars: Math.round(10 + rand() * 80),
+    cars: Math.round(dense ? 80 + rand() * 40 : 10 + rand() * 80),
     peds: Math.round(20 + rand() * 130),
     vans: Math.floor(rand() * 8),
-    hwCars: Math.round(20 + rand() * 80),
+    hwCars: Math.round(dense ? 90 + rand() * 60 : 20 + rand() * 80),
   };
 }
 
@@ -39,8 +39,8 @@ export class CollectSession {
   // frames: stop after this many (Infinity: until stopped). noise: share of episodes with
   // steering noise. scenarios: share of episodes that play a scripted scenario. highway: share of
   // episodes on the highway.
-  constructor(app, collector, { seed, frames = Infinity, hz = 10, episodeSeconds = 75, noise = 0.5, scenarios = 0.35, highway = 0.3, rand = Math.random, driver = 'expert' } = {}) {
-    Object.assign(this, { app, collector, seed, frames, hz, episodeSeconds, noise, scenarios, highway, rand, driver });
+  constructor(app, collector, { seed, frames = Infinity, hz = 10, episodeSeconds = 75, noise = 0.5, scenarios = 0.35, highway = 0.3, dense = false, rand = Math.random, driver = 'expert' } = {}) {
+    Object.assign(this, { app, collector, seed, frames, hz, episodeSeconds, noise, scenarios, highway, dense, rand, driver });
     this.total = 0;
     this.episode = 0;
     this.done = false;
@@ -58,7 +58,7 @@ export class CollectSession {
   nextEpisode() {
     const { world, rand } = this;
     this.collector.stop();
-    this.cond = randomConditions(rand, this.highway);
+    this.cond = randomConditions(rand, this.highway, this.dense);
     this.nextLane = 0; // when to pick a new preferred highway lane
     this.app.setConditions(this.cond);
     const onRoad = Object.keys(SCENARIOS).filter((id) => (SCENARIOS[id].road ?? 'city') === this.cond.road);

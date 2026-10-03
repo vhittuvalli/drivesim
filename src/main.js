@@ -204,13 +204,13 @@ async function init() {
   await autostart();
 }
 
-// URL-driven sessions: ?neural=1, ?collect=<frames>[&noise=0..1][&hwshare=0..1], ?bench=1[&trials=n].
+// URL-driven sessions: ?neural=1, ?collect=<frames>[&noise=0..1][&hwshare=0..1][&dense=1], ?bench=1[&trials=n].
 async function autostart() {
   if (params.get('neural') === '1' || params.has('bench')) {
     if (!(await setNeural(true))) return;
   }
   if (params.has('bench')) runBenchmark({ trials: Number(params.get('trials') ?? 2) });
-  else if (params.has('collect')) toggleCollect({ frames: Number(params.get('collect')) || Infinity, noise: Number(params.get('noise') ?? 0.5), highway: Number(params.get('hwshare') ?? 0.3) });
+  else if (params.has('collect')) toggleCollect({ frames: Number(params.get('collect')) || Infinity, noise: Number(params.get('noise') ?? 0.5), highway: Number(params.get('hwshare') ?? 0.3), dense: params.get('dense') === '1' });
 }
 
 // ---------- cameras ----------
