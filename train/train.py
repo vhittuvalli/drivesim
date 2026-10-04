@@ -101,6 +101,7 @@ def main():
     ap.add_argument('--init', default=None, help='checkpoint to start from (DAgger fine-tuning)')
     ap.add_argument('--resume', action='store_true', help='continue an interrupted run from <out>.last.pt')
     ap.add_argument('--retries', type=int, default=3, help='restarts of an epoch after a data-loader failure (e.g. after sleep)')
+    ap.add_argument('--speed-dropout', type=float, default=0.5, help='share of training samples whose speed input is hidden (0)')
     a = ap.parse_args()
 
     runs = load_runs(a.data)
@@ -158,7 +159,11 @@ def main():
         for batch in train_dl:
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
             image, past = augment(batch['image'], batch['past'])
-            pred = model(image, augment(batch['tele']), batch['speed'], past)
+            # Hide the speed reading in a share of samples, so the speed head can't just copy it and
+            # has to read motion from the two frames (the targets keep the true speed).
+            batch['true_speed'] = batch['speed']
+            hide = (torch.rand(len(image), 1, device=image.device) < a.speed_dropout).float()
+            pred = model(image, augment(batch['tele']), batch['speed'] * (1 - hide), past)
             loss, _ = losses(pred, batch)
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -195,7 +200,7 @@ def main():
                     'best': best, 'best_metrics': best_metrics}, last_path)
         print(
             f'epoch {epoch:2d}  train {run_loss / len(train_dl):.3f}  val wp {m["wp"]:.3f} m  lateral@8m {m["lateral_at_8m"]:.2f} m  '
-            f'speed {m["speed"]:.2f} m/s  light acc {m["light_acc"]:.1%} (at signals within 50 m {m["signal_acc"]:.1%})  stop line ±{m["stop_err"]:.1f} m  lead gap (<30 m) ±{m["gap_err"]:.1f} m  vehicle px recall {m["veh_recall"]:.1%}  seg acc {m["seg_acc"]:.1%}  depth {m["depth"]:.3f}  ({time.time() - t0:.0f}s){tag}'
+            f'speed {m["speed"]:.2f} m/s  light acc {m["light_acc"]:.1%} (at signals within 50 m {m["signal_acc"]:.1%})  stop line ±{m["stop_err"]:.1f} m  lead gap (<30 m) ±{m["gap_err"]:.1f} m  vehicle px recall {m["veh_recall"]:.1%}  speed from vision ±{m["ego_speed"]:.2f} m/s  seg acc {m["seg_acc"]:.1%}  depth {m["depth"]:.3f}  ({time.time() - t0:.0f}s){tag}'
         )
 
     ck = torch.load(a.out + '.pt', map_location='cpu')

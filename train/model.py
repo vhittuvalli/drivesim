@@ -19,6 +19,7 @@ Auxiliary outputs, used for training signal and visualization:
   light        the state of the signal ahead (none / red / yellow / green), from both cameras
   stop_dist    distance from the front bumper to that signal's stop line (meters)
   lead         gap to the obstacle on our path (m, 80 = clear) and its speed (m/s)
+  ego_speed    our own speed, from the cameras alone (training signal: makes the features encode motion)
   attention    VisualBackProp-style map of which image regions the trunk responds to
 """
 import torch
@@ -67,6 +68,8 @@ class Policy(nn.Module):
         # Lead obstacle: from both cameras and our speed (its speed is easier relative to ours).
         # Dropout: without it the head memorized the training frames' gaps and answered "clear" elsewhere.
         self.lead = nn.Sequential(nn.Dropout(0.3), nn.Linear(256 + 128 + 32, 64), nn.ReLU(inplace=True), nn.Dropout(0.3), nn.Linear(64, 2))
+        # Speed from vision only (no speed input): the CILRS remedy for copying the speed reading.
+        self.ego_speed = nn.Linear(256 + 128, 1)
         self.dec = block(64, 24, 3, 1)
         self.fuse = block(24 + 36, 24, 1, 1)
         self.seg = nn.Conv2d(24, N_CLASSES, 1)
@@ -85,13 +88,14 @@ class Policy(nn.Module):
         the current frame if omitted); speed: (B, 1) m/s.
         Returns waypoints (B, 3, 8, 2) meters, target speed (B, 3) m/s, seg logits (B, 11, 32, 64),
         depth (B, 1, 32, 64) in [0, 1], light logits (B, 4), stop-line distance (B,) meters,
-        lead (B, 2) gap meters and speed m/s, attention (B, 1, 32, 64) in [0, 1]."""
+        lead (B, 2) gap meters and speed m/s, ego speed (B,) m/s from vision, attention (B, 1, 32, 64) in [0, 1]."""
         f2, f3, f4, f5, f6 = self.trunk(image)
         p6 = self.trunk(past)[-1] if past is not None else f6
         vis = torch.cat([self.fc(torch.cat([f6, f6 - p6], 1)), self.tele((tele - self.mean) / self.std)], 1)
         light = self.light(vis)
         stop_dist = F.softplus(self.stop(vis)[:, 0]) * 10.0
         z = torch.cat([vis, self.speed_fc(speed / SPEED_SCALE)], 1)
+        ego_speed = F.softplus(self.ego_speed(vis)[:, 0]) * 5.0
         lo = self.lead(z)
         lead = torch.stack([F.softplus(lo[:, 0]) * 20.0, F.softplus(lo[:, 1]) * 5.0], 1)
         out = torch.stack([h(z) for h in self.heads], 1)  # (B, 3, 17)
@@ -111,12 +115,12 @@ class Policy(nn.Module):
         lo = m.amin(dim=(2, 3), keepdim=True)
         hi = m.amax(dim=(2, 3), keepdim=True)
         attention = (m - lo) / (hi - lo + 1e-6)
-        return wp, v_target, seg, depth, light, stop_dist, lead, attention
+        return wp, v_target, seg, depth, light, stop_dist, lead, ego_speed, attention
 
 
-def losses(pred, batch, w_speed=0.5, w_seg=0.2, w_depth=2.0, w_light=1.0, w_stop=0.05, w_gap=0.05, w_lead_v=0.2):
+def losses(pred, batch, w_speed=0.5, w_seg=0.2, w_depth=2.0, w_light=1.0, w_stop=0.05, w_gap=0.05, w_lead_v=0.2, w_ego=0.2):
     """Masked L1 on every labelled branch, L1 on the taken branch's target speed, and the aux terms."""
-    wp, v_target, seg, depth, light, stop_dist, lead, _ = pred
+    wp, v_target, seg, depth, light, stop_dist, lead, ego_speed, _ = pred
     mask = batch['wp_mask'][:, :, None, None]
     # Nearer waypoints matter most for control: weight them up.
     near = torch.linspace(1.5, 0.7, N_WP, device=wp.device)[None, None, :, None]
@@ -133,7 +137,9 @@ def losses(pred, batch, w_speed=0.5, w_seg=0.2, w_depth=2.0, w_light=1.0, w_stop
     near = 1 + 3 * (batch['lead'][:, 0] < 30).float()
     l_gap = ((lead[:, 0] - batch['lead'][:, 0]).abs() * near * lm).sum() / lm.sum().clamp(min=1)
     l_lead_v = ((lead[:, 1] - batch['lead'][:, 1]).abs() * lm).sum() / lm.sum().clamp(min=1)
+    # True speed: batch['true_speed'] when training hides the speed input, else the input itself.
+    l_ego = (ego_speed - batch.get('true_speed', batch['speed'])[:, 0]).abs().mean()
     total = (l_wp + w_speed * l_speed + w_seg * l_seg + w_depth * l_depth + w_light * l_light + w_stop * l_stop
-             + w_gap * l_gap + w_lead_v * l_lead_v)
+             + w_gap * l_gap + w_lead_v * l_lead_v + w_ego * l_ego)
     return total, {'wp': l_wp.item(), 'speed': l_speed.item(), 'seg': l_seg.item(), 'depth': l_depth.item(), 'light': l_light.item(), 'stop': l_stop.item(),
-                   'gap': l_gap.item(), 'lead_v': l_lead_v.item()}
+                   'gap': l_gap.item(), 'lead_v': l_lead_v.item(), 'ego_speed': l_ego.item()}
