@@ -101,7 +101,7 @@ def main():
     ap.add_argument('--init', default=None, help='checkpoint to start from (DAgger fine-tuning)')
     ap.add_argument('--resume', action='store_true', help='continue an interrupted run from <out>.last.pt')
     ap.add_argument('--retries', type=int, default=3, help='restarts of an epoch after a data-loader failure (e.g. after sleep)')
-    ap.add_argument('--speed-dropout', type=float, default=0.5, help='share of training samples whose speed input is hidden (0)')
+    ap.add_argument('--speed-dropout', type=float, default=0.5, help='share of training samples whose speed is hidden from the target-speed heads')
     a = ap.parse_args()
 
     runs = load_runs(a.data)
@@ -134,6 +134,14 @@ def main():
         missing, _ = model.load_state_dict(init, strict=False)
         if missing:
             print(f'new layers (not in {a.init}): {sorted({k.split(".")[0] for k in missing})}')
+        if any(k.startswith('speed_heads.') for k in missing):
+            # Start the separate target-speed heads from the combined heads' speed output.
+            with torch.no_grad():
+                for h, sh in zip(model.heads, model.speed_heads):
+                    sh[0].load_state_dict(h[0].state_dict())
+                    sh[2].weight.copy_(h[2].weight[-1:])
+                    sh[2].bias.copy_(h[2].bias[-1:])
+            print('target-speed heads initialized from the combined heads')
         print(f'fine-tuning from {a.init}')
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=1e-4)
     steps = a.epochs * len(train_dl)
@@ -163,7 +171,7 @@ def main():
             # has to read motion from the two frames (the targets keep the true speed).
             batch['true_speed'] = batch['speed']
             hide = (torch.rand(len(image), 1, device=image.device) < a.speed_dropout).float()
-            pred = model(image, augment(batch['tele']), batch['speed'] * (1 - hide), past)
+            pred = model(image, augment(batch['tele']), batch['speed'], past, speed_v=batch['speed'] * (1 - hide))
             loss, _ = losses(pred, batch)
             opt.zero_grad(set_to_none=True)
             loss.backward()

@@ -63,6 +63,12 @@ class Policy(nn.Module):
         self.heads = nn.ModuleList(
             nn.Sequential(nn.Linear(256 + 128 + 32, 128), nn.ReLU(inplace=True), nn.Linear(128, N_WP * 2 + 1)) for _ in range(N_CMD)
         )
+        # Target speed has its own heads with their own speed input, which training hides in a share
+        # of samples: the waypoints keep the true speed (their spacing scales with it above 12 m/s;
+        # hiding it from them broke steering), the speed decision has to read motion instead.
+        self.speed_heads = nn.ModuleList(
+            nn.Sequential(nn.Linear(256 + 128 + 32, 128), nn.ReLU(inplace=True), nn.Linear(128, 1)) for _ in range(N_CMD)
+        )
         self.light = nn.Linear(256 + 128, N_LIGHTS)
         self.stop = nn.Linear(256 + 128, 1)
         # Lead obstacle: from both cameras and our speed (its speed is easier relative to ours).
@@ -83,9 +89,10 @@ class Policy(nn.Module):
         f5 = self.c5(f4)
         return f2, f3, f4, f5, self.c6(f5)
 
-    def forward(self, image, tele, speed, past=None):
+    def forward(self, image, tele, speed, past=None, speed_v=None):
         """image, tele, past: (B, 3, 128, 256) float in [0, 1] (past: the main camera 0.3 s earlier;
-        the current frame if omitted); speed: (B, 1) m/s.
+        the current frame if omitted); speed: (B, 1) m/s; speed_v: the speed the target-speed heads see
+        (training hides it in some samples; the same as speed if omitted).
         Returns waypoints (B, 3, 8, 2) meters, target speed (B, 3) m/s, seg logits (B, 11, 32, 64),
         depth (B, 1, 32, 64) in [0, 1], light logits (B, 4), stop-line distance (B,) meters,
         lead (B, 2) gap meters and speed m/s, ego speed (B,) m/s from vision, attention (B, 1, 32, 64) in [0, 1]."""
@@ -98,9 +105,10 @@ class Policy(nn.Module):
         ego_speed = F.softplus(self.ego_speed(vis)[:, 0]) * 5.0
         lo = self.lead(z)
         lead = torch.stack([F.softplus(lo[:, 0]) * 20.0, F.softplus(lo[:, 1]) * 5.0], 1)
-        out = torch.stack([h(z) for h in self.heads], 1)  # (B, 3, 17)
+        out = torch.stack([h(z) for h in self.heads], 1)  # (B, 3, 17); the last column is unused
         wp = out[..., : N_WP * 2].reshape(-1, N_CMD, N_WP, 2) * WP_SCALE
-        v_target = F.softplus(out[..., N_WP * 2]) * 4.0
+        zv = z if speed_v is None else torch.cat([vis, self.speed_fc(speed_v / SPEED_SCALE)], 1)
+        v_target = F.softplus(torch.cat([h(zv) for h in self.speed_heads], 1)) * 4.0
 
         d = F.interpolate(self.dec(f4), size=f2.shape[-2:], mode='nearest')
         fused = self.fuse(torch.cat([d, f2], 1))
