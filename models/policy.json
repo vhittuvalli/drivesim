@@ -75,33 +75,33 @@
     "terrain"
   ],
   "depth_range": 100,
-  "onnx_check_max_abs_diff": 2.09808349609375e-05,
-  "trained": "2026-10-05T03:29:41+00:00",
-  "frames": 127826,
-  "runs": 281,
+  "onnx_check_max_abs_diff": 1.52587890625e-05,
+  "trained": "2026-10-05T07:58:53+00:00",
+  "frames": 138366,
+  "runs": 304,
   "drivers": {
     "expert": 95765,
-    "neural": 25436,
-    "safety": 6625
+    "neural": 34737,
+    "safety": 7864
   },
   "epoch": 6,
   "val": {
-    "wp": 0.1763,
-    "speed": 0.4683,
-    "seg": 0.3272,
-    "depth": 0.0306,
-    "light": 0.6463,
-    "stop": 1.7749,
-    "gap": 7.6444,
-    "lead_v": 0.6077,
-    "ego_speed": 1.2745,
-    "lateral_at_8m": 0.2358,
-    "seg_acc": 0.901,
-    "light_acc": 0.8758,
-    "signal_acc": 0.8162,
-    "stop_err": 2.3428,
-    "gap_err": 17.8971,
-    "veh_recall": 0.7632
+    "wp": 0.1775,
+    "speed": 0.4292,
+    "seg": 0.3338,
+    "depth": 0.0304,
+    "light": 0.6043,
+    "stop": 1.6625,
+    "gap": 5.2507,
+    "lead_v": 0.6157,
+    "ego_speed": 1.1922,
+    "lateral_at_8m": 0.2404,
+    "seg_acc": 0.8987,
+    "light_acc": 0.8864,
+    "signal_acc": 0.8264,
+    "stop_err": 2.2574,
+    "gap_err": 11.0651,
+    "veh_recall": 0.7692
   },
-  "init": "/private/tmp/claude-501/-Users-varun-Desktop-Projects-drivesim/e608424b-26f5-4e4d-a486-8e7d84c54f65/scratchpad/split/policy.pt"
+  "init": "/private/tmp/claude-501/-Users-varun-Desktop-Projects-drivesim/e608424b-26f5-4e4d-a486-8e7d84c54f65/scratchpad/city/init.pt"
 }

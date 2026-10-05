@@ -213,3 +213,17 @@ test('safety driver: takes over on a short time to collision before contact', as
   }
   assert.ok(risk >= 1, `collision-risk takeovers: ${risk}`);
 });
+
+test('safety driver: a late braker closing on a highway jam is taken over in time', () => {
+  let risk = 0;
+  for (const seed of [1, 2, 3]) {
+    const w = world(seed, { cars: 0, peds: 0 });
+    // Brakes, but only gently: about a third of what the expert asks for.
+    w.setPolicy({ control: (_, exp) => ({ steer: exp.steer, throttle: exp.throttle < 0 ? exp.throttle * 0.3 : exp.throttle }) });
+    const run = w.startScenario('hw-jam');
+    while (run.status === 'running') w.step(1 / 60);
+    risk += w.safety.events.filter((e) => e.reason === 'collision risk').length;
+    assert.equal(w.contacts, 0, `seed ${seed}: ${run.message}`);
+  }
+  assert.ok(risk >= 1, `collision-risk takeovers: ${risk}`);
+});
