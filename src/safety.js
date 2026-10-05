@@ -56,7 +56,10 @@ export class SafetyDriver {
     // A short grace (two 10 Hz observations): a learned driver can't react on the very step the
     // expert's demand jumps.
     const L = exp.lead, rate = L ? car.v - L.v : 0;
-    const risk = !!L && L.gap < 60 && rate > 0.5 && L.gap / rate < this.ttcMin && nn.throttle > exp.throttle + 0.3;
+    // The threshold grows with speed (2 s up to 10 m/s, 3.5 s at 25 m/s): closing on a stopped jam at
+    // highway speed, 2 s left too little room and the takeover came too late to avoid contact.
+    const ttcMin = Math.max(this.ttcMin, 1 + car.v / 10);
+    const risk = !!L && L.gap < 80 && rate > 0.5 && L.gap / rate < ttcMin && nn.throttle > exp.throttle + 0.3;
     this.closing = risk ? this.closing + dt : 0;
     if (risk && this.closing > this.ttcGrace) return 'collision risk';
     const under = exp.acc < this.brakeDemand && car.v > 1 && nn.throttle > exp.throttle + 0.35;

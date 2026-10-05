@@ -311,6 +311,9 @@ export class LaneChanger {
     if (this.cool > 0 || this.wait > 0 || !self.hw) return null;
     this.wait = 0.5;
     const lane = route.lane, cur = neighbors(self, lane, agents);
+    // Room to swerve: a lane change bends out slowly at first (half its length to get ~2 m across),
+    // so starting one right behind a stopped car clips its corner. Wait for the gap instead.
+    if (cur.lead && cur.lead.gap < 0.5 * changeDistance(v) && cur.lead.v < v + 1) return null;
     // A stalled car ahead makes leaving the lane mandatory: at a standstill behind it IDM alone
     // would see nothing to gain.
     const blocked = !!cur.lead?.agent.hazard && cur.lead.gap < 150;
