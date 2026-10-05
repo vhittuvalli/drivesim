@@ -104,6 +104,12 @@ sits still for 2.5 s when the expert would pull away, the expert drives for 3 s 
 takeover. Training oversamples turns, lane changes, pulling away from a stop, hard braking and
 frames with an obstacle close ahead.
 
+**Two moments of the camera.** The network also sees the main camera 0.3 s earlier, through the same
+image encoder, so it can tell that a car ahead is getting closer. Its target speed comes from separate
+heads whose speed input is hidden in half the training samples (and it learns to estimate its own speed
+from the images), so it can't just copy the speed it's already going; the path heads always see the
+true speed, since waypoint spacing depends on it.
+
 **Traffic lights and obstacles.** A second, narrow camera (22°, pitched up) makes signal lamps a few
 pixels across instead of one. Besides the paths and speeds, the network predicts the state of the
 signal ahead, the distance to its stop line, and the gap to and speed of the obstacle on its path.

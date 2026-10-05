@@ -6,6 +6,10 @@ output head per navigation command (left / straight / right at the next intersec
 heads are trained on every frame where the expert can label them (see src/labels.js); at run
 time the route's command picks the head.
 
+Two moments of the main camera: the current frame and the one PAST_DT (0.3 s) earlier go through
+the same trunk, and the heads see the current features plus their change. A single frame can't
+show that the car ahead is getting closer, and the network braked late for that reason.
+
 The traffic-light camera (a narrow view up the road, see src/sensor.js) has its own small
 encoder: in the main camera a signal lamp is about a pixel, so a stopped car at a red light and at
 a green one looked the same.
@@ -15,6 +19,7 @@ Auxiliary outputs, used for training signal and visualization:
   light        the state of the signal ahead (none / red / yellow / green), from both cameras
   stop_dist    distance from the front bumper to that signal's stop line (meters)
   lead         gap to the obstacle on our path (m, 80 = clear) and its speed (m/s)
+  ego_speed    our own speed, from the cameras alone (training signal: makes the features encode motion)
   attention    VisualBackProp-style map of which image regions the trunk responds to
 """
 import torch
@@ -46,7 +51,8 @@ class Policy(nn.Module):
         self.c4 = block(48, 64, 3, 1)  # 16x32
         self.c5 = block(64, 96, 3, 2)  # 8x16
         self.c6 = block(96, 64, 3, 2)  # 4x8
-        self.fc = nn.Sequential(nn.Flatten(), nn.Linear(64 * 4 * 8, 256), nn.ReLU(inplace=True), nn.Dropout(0.3))
+        # Current trunk features and their change since the past frame.
+        self.fc = nn.Sequential(nn.Flatten(), nn.Linear(64 * 4 * 8 * 2, 256), nn.ReLU(inplace=True), nn.Dropout(0.3))
         # Traffic-light camera: a lighter trunk; lamps are small, so keep the first stride-2 layer
         # narrow but don't pool them away before they have a few channels.
         self.tele = nn.Sequential(
@@ -57,38 +63,52 @@ class Policy(nn.Module):
         self.heads = nn.ModuleList(
             nn.Sequential(nn.Linear(256 + 128 + 32, 128), nn.ReLU(inplace=True), nn.Linear(128, N_WP * 2 + 1)) for _ in range(N_CMD)
         )
+        # Target speed has its own heads with their own speed input, which training hides in a share
+        # of samples: the waypoints keep the true speed (their spacing scales with it above 12 m/s;
+        # hiding it from them broke steering), the speed decision has to read motion instead.
+        self.speed_heads = nn.ModuleList(
+            nn.Sequential(nn.Linear(256 + 128 + 32, 128), nn.ReLU(inplace=True), nn.Linear(128, 1)) for _ in range(N_CMD)
+        )
         self.light = nn.Linear(256 + 128, N_LIGHTS)
         self.stop = nn.Linear(256 + 128, 1)
         # Lead obstacle: from both cameras and our speed (its speed is easier relative to ours).
         # Dropout: without it the head memorized the training frames' gaps and answered "clear" elsewhere.
         self.lead = nn.Sequential(nn.Dropout(0.3), nn.Linear(256 + 128 + 32, 64), nn.ReLU(inplace=True), nn.Dropout(0.3), nn.Linear(64, 2))
+        # Speed from vision only (no speed input): the CILRS remedy for copying the speed reading.
+        self.ego_speed = nn.Linear(256 + 128, 1)
         self.dec = block(64, 24, 3, 1)
         self.fuse = block(24 + 36, 24, 1, 1)
         self.seg = nn.Conv2d(24, N_CLASSES, 1)
         self.depth = nn.Conv2d(24, 1, 1)
 
-    def forward(self, image, tele, speed):
-        """image, tele: (B, 3, 128, 256) float in [0, 1]; speed: (B, 1) m/s.
-        Returns waypoints (B, 3, 8, 2) meters, target speed (B, 3) m/s, seg logits (B, 11, 32, 64),
-        depth (B, 1, 32, 64) in [0, 1], light logits (B, 4), stop-line distance (B,) meters,
-        lead (B, 2) gap meters and speed m/s, attention (B, 1, 32, 64) in [0, 1]."""
-        x = (image - self.mean) / self.std
-        f1 = self.c1(x)
+    def trunk(self, x):
+        f1 = self.c1((x - self.mean) / self.std)
         f2 = self.c2(f1)
         f3 = self.c3(f2)
         f4 = self.c4(f3)
         f5 = self.c5(f4)
-        f6 = self.c6(f5)
+        return f2, f3, f4, f5, self.c6(f5)
 
-        vis = torch.cat([self.fc(f6), self.tele((tele - self.mean) / self.std)], 1)
+    def forward(self, image, tele, speed, past=None, speed_v=None):
+        """image, tele, past: (B, 3, 128, 256) float in [0, 1] (past: the main camera 0.3 s earlier;
+        the current frame if omitted); speed: (B, 1) m/s; speed_v: the speed the target-speed heads see
+        (training hides it in some samples; the same as speed if omitted).
+        Returns waypoints (B, 3, 8, 2) meters, target speed (B, 3) m/s, seg logits (B, 11, 32, 64),
+        depth (B, 1, 32, 64) in [0, 1], light logits (B, 4), stop-line distance (B,) meters,
+        lead (B, 2) gap meters and speed m/s, ego speed (B,) m/s from vision, attention (B, 1, 32, 64) in [0, 1]."""
+        f2, f3, f4, f5, f6 = self.trunk(image)
+        p6 = self.trunk(past)[-1] if past is not None else f6
+        vis = torch.cat([self.fc(torch.cat([f6, f6 - p6], 1)), self.tele((tele - self.mean) / self.std)], 1)
         light = self.light(vis)
         stop_dist = F.softplus(self.stop(vis)[:, 0]) * 10.0
         z = torch.cat([vis, self.speed_fc(speed / SPEED_SCALE)], 1)
+        ego_speed = F.softplus(self.ego_speed(vis)[:, 0]) * 5.0
         lo = self.lead(z)
         lead = torch.stack([F.softplus(lo[:, 0]) * 20.0, F.softplus(lo[:, 1]) * 5.0], 1)
-        out = torch.stack([h(z) for h in self.heads], 1)  # (B, 3, 17)
+        out = torch.stack([h(z) for h in self.heads], 1)  # (B, 3, 17); the last column is unused
         wp = out[..., : N_WP * 2].reshape(-1, N_CMD, N_WP, 2) * WP_SCALE
-        v_target = F.softplus(out[..., N_WP * 2]) * 4.0
+        zv = z if speed_v is None else torch.cat([vis, self.speed_fc(speed_v / SPEED_SCALE)], 1)
+        v_target = F.softplus(torch.cat([h(zv) for h in self.speed_heads], 1)) * 4.0
 
         d = F.interpolate(self.dec(f4), size=f2.shape[-2:], mode='nearest')
         fused = self.fuse(torch.cat([d, f2], 1))
@@ -103,12 +123,12 @@ class Policy(nn.Module):
         lo = m.amin(dim=(2, 3), keepdim=True)
         hi = m.amax(dim=(2, 3), keepdim=True)
         attention = (m - lo) / (hi - lo + 1e-6)
-        return wp, v_target, seg, depth, light, stop_dist, lead, attention
+        return wp, v_target, seg, depth, light, stop_dist, lead, ego_speed, attention
 
 
-def losses(pred, batch, w_speed=0.5, w_seg=0.2, w_depth=2.0, w_light=1.0, w_stop=0.05, w_gap=0.05, w_lead_v=0.2):
+def losses(pred, batch, w_speed=0.5, w_seg=0.2, w_depth=2.0, w_light=1.0, w_stop=0.05, w_gap=0.05, w_lead_v=0.2, w_ego=0.2):
     """Masked L1 on every labelled branch, L1 on the taken branch's target speed, and the aux terms."""
-    wp, v_target, seg, depth, light, stop_dist, lead, _ = pred
+    wp, v_target, seg, depth, light, stop_dist, lead, ego_speed, _ = pred
     mask = batch['wp_mask'][:, :, None, None]
     # Nearer waypoints matter most for control: weight them up.
     near = torch.linspace(1.5, 0.7, N_WP, device=wp.device)[None, None, :, None]
@@ -125,7 +145,9 @@ def losses(pred, batch, w_speed=0.5, w_seg=0.2, w_depth=2.0, w_light=1.0, w_stop
     near = 1 + 3 * (batch['lead'][:, 0] < 30).float()
     l_gap = ((lead[:, 0] - batch['lead'][:, 0]).abs() * near * lm).sum() / lm.sum().clamp(min=1)
     l_lead_v = ((lead[:, 1] - batch['lead'][:, 1]).abs() * lm).sum() / lm.sum().clamp(min=1)
+    # True speed: batch['true_speed'] when training hides the speed input, else the input itself.
+    l_ego = (ego_speed - batch.get('true_speed', batch['speed'])[:, 0]).abs().mean()
     total = (l_wp + w_speed * l_speed + w_seg * l_seg + w_depth * l_depth + w_light * l_light + w_stop * l_stop
-             + w_gap * l_gap + w_lead_v * l_lead_v)
+             + w_gap * l_gap + w_lead_v * l_lead_v + w_ego * l_ego)
     return total, {'wp': l_wp.item(), 'speed': l_speed.item(), 'seg': l_seg.item(), 'depth': l_depth.item(), 'light': l_light.item(), 'stop': l_stop.item(),
-                   'gap': l_gap.item(), 'lead_v': l_lead_v.item()}
+                   'gap': l_gap.item(), 'lead_v': l_lead_v.item(), 'ego_speed': l_ego.item()}

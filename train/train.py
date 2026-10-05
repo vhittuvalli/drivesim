@@ -34,18 +34,23 @@ def pick_device(name):
     return torch.device('cpu')
 
 
-def augment(img):
-    """Photometric jitter on a uint8 batch -> float [0, 1]. No geometric changes: they'd break the
-    relationship between image and waypoints."""
-    x = img.float() / 255
-    b = x.shape[0]
-    rnd = lambda lo, hi: torch.empty(b, 1, 1, 1, device=x.device).uniform_(lo, hi)
-    gray = x.mean(1, keepdim=True)
-    x = gray + (x - gray) * rnd(0.6, 1.4)  # saturation
-    x = (x - x.mean((1, 2, 3), keepdim=True)) * rnd(0.7, 1.3) + x.mean((1, 2, 3), keepdim=True)  # contrast
-    x = x * rnd(0.65, 1.35)  # brightness
-    x = x + torch.randn_like(x) * 0.02
-    return x.clamp(0, 1)
+def augment(*imgs):
+    """Photometric jitter on uint8 batches -> float [0, 1], the same jitter for every image of a sample
+    (so the change between the current and past frame is motion, not augmentation). No geometric
+    changes: they'd break the relationship between image and waypoints."""
+    b, dev = imgs[0].shape[0], imgs[0].device
+    rnd = lambda lo, hi: torch.empty(b, 1, 1, 1, device=dev).uniform_(lo, hi)
+    sat, con, bri = rnd(0.6, 1.4), rnd(0.7, 1.3), rnd(0.65, 1.35)
+    out = []
+    for img in imgs:
+        x = img.float() / 255
+        gray = x.mean(1, keepdim=True)
+        x = gray + (x - gray) * sat  # saturation
+        x = (x - x.mean((1, 2, 3), keepdim=True)) * con + x.mean((1, 2, 3), keepdim=True)  # contrast
+        x = x * bri  # brightness
+        x = x + torch.randn_like(x) * 0.02
+        out.append(x.clamp(0, 1))
+    return out if len(out) > 1 else out[0]
 
 
 @torch.no_grad()
@@ -55,7 +60,7 @@ def evaluate(model, loader, device):
     counts = {'light': [0, 0], 'signal': [0, 0], 'stop': [0, 0], 'gap': [0, 0], 'veh': [0, 0]}
     for batch in loader:
         batch = {k: v.to(device) for k, v in batch.items()}
-        pred = model(batch['image'].float() / 255, batch['tele'].float() / 255, batch['speed'])
+        pred = model(batch['image'].float() / 255, batch['tele'].float() / 255, batch['speed'], batch['past'].float() / 255)
         _, parts = losses(pred, batch)
         wp = pred[0]
         taken = wp[torch.arange(len(wp)), batch['cmd']]
@@ -96,6 +101,7 @@ def main():
     ap.add_argument('--init', default=None, help='checkpoint to start from (DAgger fine-tuning)')
     ap.add_argument('--resume', action='store_true', help='continue an interrupted run from <out>.last.pt')
     ap.add_argument('--retries', type=int, default=3, help='restarts of an epoch after a data-loader failure (e.g. after sleep)')
+    ap.add_argument('--speed-dropout', type=float, default=0.5, help='share of training samples whose speed is hidden from the target-speed heads')
     a = ap.parse_args()
 
     runs = load_runs(a.data)
@@ -123,9 +129,19 @@ def main():
 
     model = Policy().to(device)
     if a.init:
-        missing, _ = model.load_state_dict(torch.load(a.init, map_location='cpu')['model'], strict=False)
+        own = model.state_dict()
+        init = {k: v for k, v in torch.load(a.init, map_location='cpu')['model'].items() if k in own and own[k].shape == v.shape}
+        missing, _ = model.load_state_dict(init, strict=False)
         if missing:
             print(f'new layers (not in {a.init}): {sorted({k.split(".")[0] for k in missing})}')
+        if any(k.startswith('speed_heads.') for k in missing):
+            # Start the separate target-speed heads from the combined heads' speed output.
+            with torch.no_grad():
+                for h, sh in zip(model.heads, model.speed_heads):
+                    sh[0].load_state_dict(h[0].state_dict())
+                    sh[2].weight.copy_(h[2].weight[-1:])
+                    sh[2].bias.copy_(h[2].bias[-1:])
+            print('target-speed heads initialized from the combined heads')
         print(f'fine-tuning from {a.init}')
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=1e-4)
     steps = a.epochs * len(train_dl)
@@ -150,7 +166,12 @@ def main():
         total = 0.0
         for batch in train_dl:
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
-            pred = model(augment(batch['image']), augment(batch['tele']), batch['speed'])
+            image, past = augment(batch['image'], batch['past'])
+            # Hide the speed reading in a share of samples, so the speed head can't just copy it and
+            # has to read motion from the two frames (the targets keep the true speed).
+            batch['true_speed'] = batch['speed']
+            hide = (torch.rand(len(image), 1, device=image.device) < a.speed_dropout).float()
+            pred = model(image, augment(batch['tele']), batch['speed'], past, speed_v=batch['speed'] * (1 - hide))
             loss, _ = losses(pred, batch)
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -187,7 +208,7 @@ def main():
                     'best': best, 'best_metrics': best_metrics}, last_path)
         print(
             f'epoch {epoch:2d}  train {run_loss / len(train_dl):.3f}  val wp {m["wp"]:.3f} m  lateral@8m {m["lateral_at_8m"]:.2f} m  '
-            f'speed {m["speed"]:.2f} m/s  light acc {m["light_acc"]:.1%} (at signals within 50 m {m["signal_acc"]:.1%})  stop line ±{m["stop_err"]:.1f} m  lead gap (<30 m) ±{m["gap_err"]:.1f} m  vehicle px recall {m["veh_recall"]:.1%}  seg acc {m["seg_acc"]:.1%}  depth {m["depth"]:.3f}  ({time.time() - t0:.0f}s){tag}'
+            f'speed {m["speed"]:.2f} m/s  light acc {m["light_acc"]:.1%} (at signals within 50 m {m["signal_acc"]:.1%})  stop line ±{m["stop_err"]:.1f} m  lead gap (<30 m) ±{m["gap_err"]:.1f} m  vehicle px recall {m["veh_recall"]:.1%}  speed from vision ±{m["ego_speed"]:.2f} m/s  seg acc {m["seg_acc"]:.1%}  depth {m["depth"]:.3f}  ({time.time() - t0:.0f}s){tag}'
         )
 
     ck = torch.load(a.out + '.pt', map_location='cpu')
