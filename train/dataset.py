@@ -19,7 +19,17 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-COMMANDS = ['left', 'straight', 'right']
+COMMANDS = ['left', 'straight', 'right', 'overtake']  # must match src/labels.js
+
+
+def overtake_command(r):
+    """Rows from before the overtake command: an expert overtake (labeled with the next turn's
+    command and the offset path) becomes the 'overtake' command with that path."""
+    if r.get('overtaking') and r['command'] != 'overtake' and r.get('road') != 'highway':
+        path = r['wp'].get(r['command'])
+        r['wp'] = {'overtake': path}
+        r['command'] = 'overtake'
+    return r
 LIGHTS = ['none', 'red', 'yellow', 'green']  # must match src/labels.js
 # Beyond this distance a lamp is a pixel or two even in the traffic-light camera, so the light
 # label isn't learnable there: it is left out of the light loss (driving labels are unaffected).
@@ -48,6 +58,19 @@ def lead_target(r):
     if 'lead_gap' not in r:
         return (80.0, r['v']), 0.0
     return (r['lead_gap'], r['lead_v']), 1.0
+
+
+TTC_INV_MAX = 2.0  # 1/s
+
+
+def ttc_target(r):
+    """1 / time to collision with the lead obstacle (0 when not closing or nothing ahead), and
+    whether it is labeled (label version 4 on). Scale-free, so two frames can show it as looming."""
+    if 'lead_gap' not in r:
+        return 0.0, 0.0
+    if r['lead_gap'] >= 80:
+        return 0.0, 1.0
+    return min(TTC_INV_MAX, max(0.0, r['v'] - r['lead_v']) / max(r['lead_gap'], 1.0)), 1.0
 
 
 def light_target(r):
@@ -99,7 +122,7 @@ def load_runs(root):
                 name = f"{r['frame']:06d}"
                 files = [os.path.join(root, run, d, name + ext) for d, ext in (('frames', '.jpg'), ('tele', '.jpg'), ('labels', '.png'))]
                 if usable(r) and 'light' in r and all(os.path.isfile(p) for p in files):
-                    rows.append(r)
+                    rows.append(overtake_command(r))
         if rows:
             runs[run] = link_past(rows)
     return runs
@@ -146,6 +169,8 @@ def sample_weight(r):
         w *= 2
     if r.get('overtaking'):
         w *= 2
+    if ttc_target(r)[0] > 0.4:  # closing fast on something: the braking decisions
+        w *= 2
     return w
 
 
@@ -170,8 +195,8 @@ class DriveDataset(Dataset):
         depth = lab[: h * s, : w * s, 1].reshape(h, s, w, s).mean(axis=(1, 3)) / 255.0
         depth[seg == 0] = 1.0  # sky / nothing: far away
 
-        wp = np.zeros((3, N_WP, 2), np.float32)
-        mask = np.zeros(3, np.float32)
+        wp = np.zeros((len(COMMANDS), N_WP, 2), np.float32)
+        mask = np.zeros(len(COMMANDS), np.float32)
         for k, c in enumerate(COMMANDS):
             pts = r['wp'].get(c)
             if pts:
@@ -187,6 +212,8 @@ class DriveDataset(Dataset):
             'stop_mask': torch.tensor(stop_target(r)[1], dtype=torch.float32),
             'lead': torch.tensor(lead_target(r)[0], dtype=torch.float32),
             'lead_mask': torch.tensor(lead_target(r)[1], dtype=torch.float32),
+            'ttc': torch.tensor(ttc_target(r)[0], dtype=torch.float32),
+            'ttc_mask': torch.tensor(ttc_target(r)[1], dtype=torch.float32),
             'speed': torch.tensor([max(0.0, v)], dtype=torch.float32),
             'wp': torch.from_numpy(wp),
             'wp_mask': torch.from_numpy(mask),

@@ -57,7 +57,7 @@ def augment(*imgs):
 def evaluate(model, loader, device):
     model.eval()
     sums, n = {}, 0
-    counts = {'light': [0, 0], 'signal': [0, 0], 'stop': [0, 0], 'gap': [0, 0], 'veh': [0, 0]}
+    counts = {'light': [0, 0], 'signal': [0, 0], 'stop': [0, 0], 'gap': [0, 0], 'veh': [0, 0], 'ttc_r': [0, 0], 'ttc_p': [0, 0]}
     for batch in loader:
         batch = {k: v.to(device) for k, v in batch.items()}
         pred = model(batch['image'].float() / 255, batch['tele'].float() / 255, batch['speed'], batch['past'].float() / 255)
@@ -70,6 +70,11 @@ def evaluate(model, loader, device):
         veh = batch['seg'] == 8  # recall on vehicle pixels: what the braking depends on
         counts['veh'] = [counts['veh'][0] + int((pred[2].argmax(1)[veh] == 8).sum()), counts['veh'][1] + int(veh.sum())]
         sm = batch['stop_mask'] > 0
+        # Time to collision: does it flag the dangerous closings (1/TTC > 0.4), and only those?
+        tm = batch['ttc_mask'] > 0
+        truth, flag = (batch['ttc'] > 0.4) & tm, (pred[8] > 0.4) & tm
+        counts['ttc_r'] = [counts['ttc_r'][0] + int((flag & truth).sum()), counts['ttc_r'][1] + int(truth.sum())]
+        counts['ttc_p'] = [counts['ttc_p'][0] + int((flag & truth).sum()), counts['ttc_p'][1] + int(flag.sum())]
         lm = (batch['lead_mask'] > 0) & (batch['lead'][:, 0] < 30)  # gap error where it matters: obstacles within 30 m
         counts['gap'] = [counts['gap'][0] + float((pred[6][lm, 0] - batch['lead'][lm, 0]).abs().sum()), counts['gap'][1] + int(lm.sum())]
         counts['stop'] = [counts['stop'][0] + float((pred[5][sm] - batch['stop'][sm]).abs().sum()), counts['stop'][1] + int(sm.sum())]
@@ -86,6 +91,7 @@ def evaluate(model, loader, device):
     model.train()
     out = {k: v / max(n, 1) for k, v in sums.items()}
     out['light_acc'], out['signal_acc'], out['stop_err'], out['gap_err'], out['veh_recall'] = (c / max(t, 1) for c, t in (counts['light'], counts['signal'], counts['stop'], counts['gap'], counts['veh']))
+    out['ttc_recall'], out['ttc_precision'] = (c / max(t, 1) for c, t in (counts['ttc_r'], counts['ttc_p']))
     return out
 
 
@@ -134,6 +140,13 @@ def main():
         missing, _ = model.load_state_dict(init, strict=False)
         if missing:
             print(f'new layers (not in {a.init}): {sorted({k.split(".")[0] for k in missing})}')
+        if any(k.startswith('heads.3.') for k in missing):
+            # The new overtake branch starts as a copy of the straight one (lane following).
+            with torch.no_grad():
+                model.heads[3].load_state_dict(model.heads[1].state_dict())
+                if not any(k.startswith('speed_heads.') for k in missing):
+                    model.speed_heads[3].load_state_dict(model.speed_heads[1].state_dict())
+            print('overtake branch initialized from the straight branch')
         if any(k.startswith('speed_heads.') for k in missing):
             # Start the separate target-speed heads from the combined heads' speed output.
             with torch.no_grad():
@@ -208,7 +221,7 @@ def main():
                     'best': best, 'best_metrics': best_metrics}, last_path)
         print(
             f'epoch {epoch:2d}  train {run_loss / len(train_dl):.3f}  val wp {m["wp"]:.3f} m  lateral@8m {m["lateral_at_8m"]:.2f} m  '
-            f'speed {m["speed"]:.2f} m/s  light acc {m["light_acc"]:.1%} (at signals within 50 m {m["signal_acc"]:.1%})  stop line ±{m["stop_err"]:.1f} m  lead gap (<30 m) ±{m["gap_err"]:.1f} m  vehicle px recall {m["veh_recall"]:.1%}  speed from vision ±{m["ego_speed"]:.2f} m/s  seg acc {m["seg_acc"]:.1%}  depth {m["depth"]:.3f}  ({time.time() - t0:.0f}s){tag}'
+            f'speed {m["speed"]:.2f} m/s  light acc {m["light_acc"]:.1%} (at signals within 50 m {m["signal_acc"]:.1%})  stop line ±{m["stop_err"]:.1f} m  lead gap (<30 m) ±{m["gap_err"]:.1f} m  vehicle px recall {m["veh_recall"]:.1%}  speed from vision ±{m["ego_speed"]:.2f} m/s  danger (TTC<2.5 s) recall {m["ttc_recall"]:.0%} precision {m["ttc_precision"]:.0%}  seg acc {m["seg_acc"]:.1%}  depth {m["depth"]:.3f}  ({time.time() - t0:.0f}s){tag}'
         )
 
     ck = torch.load(a.out + '.pt', map_location='cpu')
