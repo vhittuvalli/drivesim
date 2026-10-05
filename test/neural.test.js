@@ -115,3 +115,101 @@ test('neural driver: perfect waypoint predictions drive with (almost) no takeove
   }
   assert.ok(takeovers.length <= 1, `takeovers over ~1.9 km: ${JSON.stringify(takeovers)}`);
 });
+
+test('safety driver: takes over from a policy that will not pull away, and the car then moves', () => {
+  const w = world(6);
+  w.setPolicy({ control: (_, exp) => ({ steer: exp.steer, throttle: -0.5 }) });
+  for (let t = 0; t < 60 * 60; t++) w.step(1 / 60);
+  const stalls = w.safety.events.filter((e) => e.reason === 'did not pull away').length;
+  assert.ok(stalls >= 3, `stall takeovers: ${stalls}`);
+  assert.ok(w.safety.totalDist > 40, `the expert drove during takeovers: ${w.safety.totalDist.toFixed(0)} m`);
+  assert.equal(w.contacts, 0);
+});
+
+test('labels: the light ahead is labeled red, yellow or green near a stop line, none elsewhere', async () => {
+  const { lightOf } = await import('../src/labels.js');
+  const w = world(3);
+  const seen = new Set();
+  for (let t = 0; t < 120 * 60; t++) {
+    w.step(1 / 60);
+    if (t % 15) continue;
+    const L = makeLabels(w, w.expertCtrl), st = w.expertCtrl.signal;
+    assert.equal(L.light, lightOf(w.expertCtrl));
+    if (L.light !== 'none') assert.ok(st && st.dist < 90 && L.light === st.state);
+    if (w.expertCtrl.reason === 'signal') assert.ok(['red', 'yellow'].includes(L.light), `stopping for ${L.light}`);
+    seen.add(L.light);
+  }
+  assert.ok(seen.has('red') && seen.has('green') && seen.has('none'), [...seen].join());
+});
+
+test('light-aware speed: brakes to stop at the predicted line for red, not for green or far away', async () => {
+  const { lightCap, NeuralDriver } = await import('../src/neural.js');
+  // 10 m/s, red light, line 20 m ahead: brake at about v^2 / 2(d - 1).
+  const a = lightCap(10, 20, 0.95, 0.02);
+  assert.ok(a < -2 && a > -3, `decel ${a}`);
+  assert.equal(lightCap(10, 20, 0.05, 0.02), null, 'green: no cap');
+  assert.equal(lightCap(10, 80, 0.95, 0.02), null, 'beyond range: no cap');
+  assert.ok(lightCap(10, 45, 0.95, 0.02) === 0 || lightCap(10, 45, 0.95, 0.02) < 0, 'far: at least no speeding up');
+  assert.equal(lightCap(15, 8, 0.02, 0.95), null, 'amber too close to stop for: go through');
+  assert.ok(lightCap(8, 30, 0.02, 0.95) <= 0, 'amber with room: stop');
+  // Through the driver: a confident red with the line 15 m ahead brakes even though the
+  // network's own target speed says keep going; a stopped car holds the brake at the line.
+  const nn = new NeuralDriver();
+  const pose = { x: 0, z: 0, h: 0 }, straight = [2, 4, 6, 8, 11, 14, 18, 23].map((d) => [d, 0]);
+  const red = { none: 0.02, red: 0.95, yellow: 0.01, green: 0.02 };
+  for (let i = 0; i < 3; i++) nn.setPrediction(pose, 'straight', [straight, straight, straight], [10, 10, 10], { light: red, stopDist: 15 });
+  const moving = nn.control({ car: { x: 0, z: 0, h: 0, v: 10 } });
+  assert.ok(moving.throttle < -0.2 && moving.lightStop, JSON.stringify(moving));
+  const stopped = nn.control({ car: { x: 13.5, z: 0, h: 0, v: 0.2 } });
+  assert.equal(stopped.throttle, -0.5, 'holds the brake at the line');
+  nn.lightAware = false;
+  assert.ok(nn.control({ car: { x: 0, z: 0, h: 0, v: 10 } }).throttle > 0, 'without the cap it would drive on');
+});
+
+test('labels: the lead obstacle is the one the expert brakes for, clear road is far', () => {
+  const w = world(4, { cars: 90 });
+  let following = 0, clear = 0;
+  for (let t = 0; t < 90 * 60; t++) {
+    w.step(1 / 60);
+    if (t % 15) continue;
+    const L = makeLabels(w, w.expertCtrl), lead = w.expertCtrl.lead;
+    assert.ok(L.lead.gap >= 0 && L.lead.gap <= 80 && L.lead.v >= 0);
+    if (lead && lead.gap < 80) (following++), assert.ok(Math.abs(L.lead.gap - lead.gap) < 1e-9);
+    else (clear++), assert.equal(L.lead.gap, 80);
+    if (w.expertCtrl.reason === 'vehicle') assert.ok(L.lead.gap < 80, 'braking for a vehicle means a lead within range');
+  }
+  assert.ok(following > 20 && clear > 20, `following ${following}, clear ${clear}`);
+});
+
+test('lead-aware braking: IDM toward the predicted obstacle, only when it calls for braking', async () => {
+  const { leadCap, NeuralDriver } = await import('../src/neural.js');
+  assert.equal(leadCap(10, 80, 10, 11), null, 'clear road');
+  assert.equal(leadCap(10, 30, 10, 11), null, 'following at a comfortable gap');
+  assert.ok(leadCap(9, 14, 1.4, 9) < -4, 'closing fast on a nearly stopped car: brake hard');
+  assert.ok(leadCap(26.5, 12, 21, 26.5) < -3, 'cut-in 12 m ahead at highway speed');
+  assert.equal(leadCap(0, 8, 0, 5), null, 'stopped well behind a stopped car: may roll up');
+  assert.ok(leadCap(0.5, 1, 0, 3) < 0, 'too close behind a stopped car: hold');
+  // Through the driver: the network wants to keep 9 m/s, the lead output says a stopped car 14 m ahead.
+  const nn = new NeuralDriver(), pose = { x: 0, z: 0, h: 0 }, straight = [2, 4, 6, 8, 11, 14, 18, 23].map((d) => [d, 0]);
+  nn.setPrediction(pose, 'straight', [straight, straight, straight], [9, 9, 9], { t: 0, lead: { gap: 14, v: 0 } });
+  const c = nn.control({ t: 0.05, car: { x: 0.45, z: 0, h: 0, v: 9 } });
+  assert.ok(c.leadBrake && c.throttle < -0.5, JSON.stringify(c));
+  nn.leadAware = false;
+  assert.ok(nn.control({ t: 0.05, car: { x: 0.45, z: 0, h: 0, v: 9 } }).throttle >= 0, 'without the cap it would keep going');
+});
+
+test('safety driver: takes over on a short time to collision before contact', async () => {
+  const { SCENARIOS } = await import('../src/scenarios.js');
+  let risk = 0;
+  for (const seed of [1, 2, 3]) {
+    const w = world(seed, { cars: 0, peds: 0 });
+    // Brakes, but only gently: about a third of what the expert asks for.
+    w.setPolicy({ control: (_, exp) => ({ steer: exp.steer, throttle: exp.throttle < 0 ? exp.throttle * 0.3 : exp.throttle }) });
+    const run = w.startScenario('lead-brake');
+    while (run.status === 'running') w.step(1 / 60);
+    risk += w.safety.events.filter((e) => e.reason === 'collision risk').length;
+    assert.ok(w.safety.disengagements >= 1, `seed ${seed}: the gentle braker was taken over`);
+    assert.equal(w.contacts, 0, `seed ${seed}: ${run.message}`);
+  }
+  assert.ok(risk >= 1, `collision-risk takeovers: ${risk}`);
+});

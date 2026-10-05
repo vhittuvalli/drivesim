@@ -204,13 +204,13 @@ async function init() {
   await autostart();
 }
 
-// URL-driven sessions: ?neural=1, ?collect=<frames>[&noise=0..1][&hwshare=0..1], ?bench=1[&trials=n].
+// URL-driven sessions: ?neural=1, ?collect=<frames>[&noise=0..1][&hwshare=0..1][&dense=1], ?bench=1[&trials=n].
 async function autostart() {
   if (params.get('neural') === '1' || params.has('bench')) {
     if (!(await setNeural(true))) return;
   }
   if (params.has('bench')) runBenchmark({ trials: Number(params.get('trials') ?? 2) });
-  else if (params.has('collect')) toggleCollect({ frames: Number(params.get('collect')) || Infinity, noise: Number(params.get('noise') ?? 0.5), highway: Number(params.get('hwshare') ?? 0.3) });
+  else if (params.has('collect')) toggleCollect({ frames: Number(params.get('collect')) || Infinity, noise: Number(params.get('noise') ?? 0.5), highway: Number(params.get('hwshare') ?? 0.3), dense: params.get('dense') === '1' });
 }
 
 // ---------- cameras ----------
@@ -521,8 +521,10 @@ function sensorFrame() {
   if (!wantNN && !wantData) return;
   city.setSignalColors((n, a) => world.signals.state(n, a)); // the lamps must match this instant
   const rgb = rig.renderRGB(car);
-  if (wantNN) neural.observe(world, rgb);
-  if (wantData) collectSession.captured(collector.capture(world, rgb, { weather: settings.weather, hour: settings.hour, scenario: settings.scenario }));
+  // The traffic-light camera, for collection and for networks that take it as an input.
+  const tele = wantData || neural.usesTele ? rig.renderTele(car) : null;
+  if (wantNN) neural.observe(world, rgb, tele);
+  if (wantData) collectSession.captured(collector.capture(world, rgb, { weather: settings.weather, hour: settings.hour, scenario: settings.scenario }, tele));
 }
 
 async function setNeural(on) {
@@ -607,10 +609,14 @@ function benchmarkDone() {
 }
 
 // Progress of automated sessions, read by scripts/headless.mjs.
+// The GPU context can be lost in long headless runs; scripts/headless.mjs restarts the browser.
+let contextLost = false;
+canvas.addEventListener('webglcontextlost', () => (contextLost = true));
+
 window.__status = () => {
   if (!world) return null;
   return {
-    seed, t: world.t, fps: $('fps').textContent, error: collector.error ?? neural.error,
+    seed, t: world.t, contextLost, fps: $('fps').textContent, error: collector.error ?? neural.error,
     model: neural.meta ? { trained: neural.meta.trained, frames: neural.meta.frames, init: neural.meta.init } : null,
     collect: collectSession?.status ?? null,
     bench: bench && { done: bench.done, progress: { index: bench.index, total: bench.items.length }, summary: bench.summary ?? null, results: bench.results },
@@ -722,7 +728,7 @@ window.addEventListener('keydown', (e) => {
   else if (key === 'h') setControlsVisible($('controls').hidden);
 });
 
-window.__dbg = { scene, sun, renderer, camera, cityUniforms, get orbit() { return orbit; }, get world() { return world; }, get neural() { return neural; }, get bench() { return bench; }, get collect() { return collectSession; } };
+window.__dbg = { scene, sun, renderer, camera, cityUniforms, get orbit() { return orbit; }, get world() { return world; }, get neural() { return neural; }, get rig() { return rig; }, get bench() { return bench; }, get collect() { return collectSession; } };
 init().catch((err) => {
   console.error(err);
   setLoading(`Failed to start: ${err.message}`);

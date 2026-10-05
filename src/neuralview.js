@@ -107,8 +107,12 @@ export class NeuralView {
       (s.disengagements ? ` · ${fmtDist(s.distPerDisengagement)} each` : '');
     const p = neural.pred;
     const last = s.events[s.events.length - 1];
+    const light = p?.light && Object.entries(p.light).sort((a, b) => b[1] - a[1])[0];
     $('nn-info').textContent = [
       p ? `cmd ${p.cmd}` : null,
+      light ? `light ${light[0]} ${(light[1] * 100).toFixed(0)}%` : null,
+      c?.nn?.lightStop ? 'stopping for the light' : null,
+      p?.lead && p.lead.gap < 60 ? `lead ${p.lead.gap.toFixed(0)} m${c?.nn?.leadBrake ? ' · braking' : ''}` : null,
       p ? `target ${(p.vTarget[p.cmdIndex] * 3.6).toFixed(0)} km/h` : null,
       neural.inferMs ? `${neural.inferMs.toFixed(0)} ms` : null,
       last && world.t - last.t < 6 ? `took over: ${last.reason}` : null,
@@ -117,6 +121,8 @@ export class NeuralView {
       this.shownPred = p;
       this.drawCamera(p);
       this.drawSeg(p);
+      $('nn-tele-fig').hidden = !p.tele;
+      if (p.tele) $('nn-tele').getContext('2d').putImageData(p.tele, 0, 0);
     }
     this.drawChart(world.t);
   }

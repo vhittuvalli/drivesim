@@ -6,6 +6,7 @@
 Uses the Apple GPU (MPS) or CUDA when available.
 """
 import argparse
+import copy
 import math
 import os
 import sys
@@ -33,39 +34,59 @@ def pick_device(name):
     return torch.device('cpu')
 
 
-def augment(img):
-    """Photometric jitter on a uint8 batch -> float [0, 1]. No geometric changes: they'd break the
-    relationship between image and waypoints."""
-    x = img.float() / 255
-    b = x.shape[0]
-    rnd = lambda lo, hi: torch.empty(b, 1, 1, 1, device=x.device).uniform_(lo, hi)
-    gray = x.mean(1, keepdim=True)
-    x = gray + (x - gray) * rnd(0.6, 1.4)  # saturation
-    x = (x - x.mean((1, 2, 3), keepdim=True)) * rnd(0.7, 1.3) + x.mean((1, 2, 3), keepdim=True)  # contrast
-    x = x * rnd(0.65, 1.35)  # brightness
-    x = x + torch.randn_like(x) * 0.02
-    return x.clamp(0, 1)
+def augment(*imgs):
+    """Photometric jitter on uint8 batches -> float [0, 1], the same jitter for every image of a sample
+    (so the change between the current and past frame is motion, not augmentation). No geometric
+    changes: they'd break the relationship between image and waypoints."""
+    b, dev = imgs[0].shape[0], imgs[0].device
+    rnd = lambda lo, hi: torch.empty(b, 1, 1, 1, device=dev).uniform_(lo, hi)
+    sat, con, bri = rnd(0.6, 1.4), rnd(0.7, 1.3), rnd(0.65, 1.35)
+    out = []
+    for img in imgs:
+        x = img.float() / 255
+        gray = x.mean(1, keepdim=True)
+        x = gray + (x - gray) * sat  # saturation
+        x = (x - x.mean((1, 2, 3), keepdim=True)) * con + x.mean((1, 2, 3), keepdim=True)  # contrast
+        x = x * bri  # brightness
+        x = x + torch.randn_like(x) * 0.02
+        out.append(x.clamp(0, 1))
+    return out if len(out) > 1 else out[0]
 
 
 @torch.no_grad()
 def evaluate(model, loader, device):
     model.eval()
     sums, n = {}, 0
+    counts = {'light': [0, 0], 'signal': [0, 0], 'stop': [0, 0], 'gap': [0, 0], 'veh': [0, 0]}
     for batch in loader:
         batch = {k: v.to(device) for k, v in batch.items()}
-        pred = model(batch['image'].float() / 255, batch['speed'])
+        pred = model(batch['image'].float() / 255, batch['tele'].float() / 255, batch['speed'], batch['past'].float() / 255)
         _, parts = losses(pred, batch)
         wp = pred[0]
         taken = wp[torch.arange(len(wp)), batch['cmd']]
         target = batch['wp'][torch.arange(len(wp)), batch['cmd']]
         parts['lateral_at_8m'] = (taken[:, 3, 1] - target[:, 3, 1]).abs().mean().item()
         parts['seg_acc'] = (pred[2].argmax(1) == batch['seg']).float().mean().item()
+        veh = batch['seg'] == 8  # recall on vehicle pixels: what the braking depends on
+        counts['veh'] = [counts['veh'][0] + int((pred[2].argmax(1)[veh] == 8).sum()), counts['veh'][1] + int(veh.sum())]
+        sm = batch['stop_mask'] > 0
+        lm = (batch['lead_mask'] > 0) & (batch['lead'][:, 0] < 30)  # gap error where it matters: obstacles within 30 m
+        counts['gap'] = [counts['gap'][0] + float((pred[6][lm, 0] - batch['lead'][lm, 0]).abs().sum()), counts['gap'][1] + int(lm.sum())]
+        counts['stop'] = [counts['stop'][0] + float((pred[5][sm] - batch['stop'][sm]).abs().sum()), counts['stop'][1] + int(sm.sum())]
+        # Light accuracy as counts: per-batch means would score batches with no signal in view
+        # (a highway stretch) as 0%.
+        hit = pred[4].argmax(1) == batch['light']
+        graded, lit = batch['light'] >= 0, batch['light'] > 0
+        counts['light'] = [counts['light'][0] + int(hit[graded].sum()), counts['light'][1] + int(graded.sum())]
+        counts['signal'] = [counts['signal'][0] + int(hit[lit].sum()), counts['signal'][1] + int(lit.sum())]
         k = len(wp)
         for key, val in parts.items():
             sums[key] = sums.get(key, 0) + val * k
         n += k
     model.train()
-    return {k: v / max(n, 1) for k, v in sums.items()}
+    out = {k: v / max(n, 1) for k, v in sums.items()}
+    out['light_acc'], out['signal_acc'], out['stop_err'], out['gap_err'], out['veh_recall'] = (c / max(t, 1) for c, t in (counts['light'], counts['signal'], counts['stop'], counts['gap'], counts['veh']))
+    return out
 
 
 def main():
@@ -78,6 +99,9 @@ def main():
     ap.add_argument('--workers', type=int, default=4)
     ap.add_argument('--device', default='auto')
     ap.add_argument('--init', default=None, help='checkpoint to start from (DAgger fine-tuning)')
+    ap.add_argument('--resume', action='store_true', help='continue an interrupted run from <out>.last.pt')
+    ap.add_argument('--retries', type=int, default=3, help='restarts of an epoch after a data-loader failure (e.g. after sleep)')
+    ap.add_argument('--speed-dropout', type=float, default=0.5, help='share of training samples whose speed is hidden from the target-speed heads')
     a = ap.parse_args()
 
     runs = load_runs(a.data)
@@ -95,12 +119,29 @@ def main():
     train_ds = DriveDataset(a.data, train_items, speed_noise=0.3)
     sampler = WeightedRandomSampler([sample_weight(r) for _, r in train_items], num_samples=len(train_items), replacement=True)
     kw = dict(batch_size=a.batch, num_workers=a.workers, persistent_workers=a.workers > 0)
-    train_dl = DataLoader(train_ds, sampler=sampler, drop_last=True, **kw)
-    val_dl = DataLoader(DriveDataset(a.data, val_items), shuffle=False, **kw)
+    val_ds = DriveDataset(a.data, val_items)
+
+    def loaders():
+        # Rebuilt after a failure: worker processes and their shared memory don't survive sleep well.
+        return DataLoader(train_ds, sampler=sampler, drop_last=True, **kw), DataLoader(val_ds, shuffle=False, **kw)
+
+    train_dl, val_dl = loaders()
 
     model = Policy().to(device)
     if a.init:
-        model.load_state_dict(torch.load(a.init, map_location='cpu')['model'])
+        own = model.state_dict()
+        init = {k: v for k, v in torch.load(a.init, map_location='cpu')['model'].items() if k in own and own[k].shape == v.shape}
+        missing, _ = model.load_state_dict(init, strict=False)
+        if missing:
+            print(f'new layers (not in {a.init}): {sorted({k.split(".")[0] for k in missing})}')
+        if any(k.startswith('speed_heads.') for k in missing):
+            # Start the separate target-speed heads from the combined heads' speed output.
+            with torch.no_grad():
+                for h, sh in zip(model.heads, model.speed_heads):
+                    sh[0].load_state_dict(h[0].state_dict())
+                    sh[2].weight.copy_(h[2].weight[-1:])
+                    sh[2].bias.copy_(h[2].bias[-1:])
+            print('target-speed heads initialized from the combined heads')
         print(f'fine-tuning from {a.init}')
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=1e-4)
     steps = a.epochs * len(train_dl)
@@ -108,28 +149,66 @@ def main():
     print(f'training on {device}: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M parameters, {steps} steps')
 
     os.makedirs(os.path.dirname(a.out), exist_ok=True)
-    best, best_metrics = float('inf'), None
-    for epoch in range(1, a.epochs + 1):
-        t0, run_loss = time.time(), 0.0
-        for i, batch in enumerate(train_dl):
+    best, best_metrics, start = float('inf'), None, 1
+    last_path = a.out + '.last.pt'
+    if a.resume:
+        if not os.path.isfile(last_path):
+            raise SystemExit(f'nothing to resume: {last_path} not found')
+        st = torch.load(last_path, map_location='cpu', weights_only=False)
+        model.load_state_dict(st['model'])
+        opt.load_state_dict(st['opt'])
+        sched.load_state_dict(st['sched'])
+        best, best_metrics, start = st['best'], st['best_metrics'], st['epoch'] + 1
+        print(f'resuming after epoch {st["epoch"]} (best score {best:.3f})')
+
+    def train_epoch():
+        model.train()
+        total = 0.0
+        for batch in train_dl:
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
-            pred = model(augment(batch['image']), batch['speed'])
+            image, past = augment(batch['image'], batch['past'])
+            # Hide the speed reading in a share of samples, so the speed head can't just copy it and
+            # has to read motion from the two frames (the targets keep the true speed).
+            batch['true_speed'] = batch['speed']
+            hide = (torch.rand(len(image), 1, device=image.device) < a.speed_dropout).float()
+            pred = model(image, augment(batch['tele']), batch['speed'], past, speed_v=batch['speed'] * (1 - hide))
             loss, _ = losses(pred, batch)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             opt.step()
             sched.step()
-            run_loss += loss.item()
-        m = evaluate(model, val_dl, device)
+            total += loss.item()
+        return total
+
+    for epoch in range(start, a.epochs + 1):
+        t0 = time.time()
+        # A data-loader failure (typically "Shared memory manager connection has timed out" after
+        # the machine slept) restarts the epoch from its starting weights instead of ending the run.
+        snap = ({k: v.detach().clone() for k, v in model.state_dict().items()}, copy.deepcopy(opt.state_dict()), copy.deepcopy(sched.state_dict()))
+        for attempt in range(a.retries + 1):
+            try:
+                run_loss = train_epoch()
+                m = evaluate(model, val_dl, device)
+                break
+            except RuntimeError as e:
+                if attempt == a.retries:
+                    raise
+                print(f'epoch {epoch}: data loader failed ({str(e).splitlines()[0]}); restarting the epoch')
+                model.load_state_dict(snap[0])
+                opt.load_state_dict(snap[1])
+                sched.load_state_dict(snap[2])
+                train_dl, val_dl = loaders()
         score = m['wp'] + 0.5 * m['speed']
         tag = ''
         if score < best:
             best, best_metrics, tag = score, m, '  * best'
             torch.save({'model': model.state_dict(), 'epoch': epoch, 'metrics': m}, a.out + '.pt')
+        torch.save({'model': model.state_dict(), 'opt': opt.state_dict(), 'sched': sched.state_dict(), 'epoch': epoch,
+                    'best': best, 'best_metrics': best_metrics}, last_path)
         print(
             f'epoch {epoch:2d}  train {run_loss / len(train_dl):.3f}  val wp {m["wp"]:.3f} m  lateral@8m {m["lateral_at_8m"]:.2f} m  '
-            f'speed {m["speed"]:.2f} m/s  seg acc {m["seg_acc"]:.1%}  depth {m["depth"]:.3f}  ({time.time() - t0:.0f}s){tag}'
+            f'speed {m["speed"]:.2f} m/s  light acc {m["light_acc"]:.1%} (at signals within 50 m {m["signal_acc"]:.1%})  stop line ±{m["stop_err"]:.1f} m  lead gap (<30 m) ±{m["gap_err"]:.1f} m  vehicle px recall {m["veh_recall"]:.1%}  speed from vision ±{m["ego_speed"]:.2f} m/s  seg acc {m["seg_acc"]:.1%}  depth {m["depth"]:.3f}  ({time.time() - t0:.0f}s){tag}'
         )
 
     ck = torch.load(a.out + '.pt', map_location='cpu')

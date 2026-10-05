@@ -86,7 +86,9 @@ A camera-based driving network is trained by imitation of the expert and runs in
 
 **The network** (`train/model.py`) sees the 256×128 roof camera and the car's speed. For each navigation
 command (left / straight / right at the next intersection) it predicts 8 waypoints and a target speed
-(conditional imitation learning); the route's next turn picks the branch. It also predicts coarse
+(conditional imitation learning); the route's next turn picks the branch. The waypoints are 2–23 m
+ahead up to 12 m/s and spread out in proportion to speed above that (57 m ahead at 30 m/s), so they
+always cover about two seconds of driving. It also predicts coarse
 segmentation and depth (auxiliary training targets) and an attention map. All branches are supervised
 wherever the expert can label them, not just the one taken (`src/labels.js`). On the highway the same
 three commands mean change lanes left / keep the lane / change lanes right: the command is the lane
@@ -97,8 +99,25 @@ the lane changes it could start right now.
 *simulation* time and the simulation waits for each answer, so it drives the same on a slow machine.
 Between observations its path is held in world coordinates and followed with pure pursuit; the target
 speed sets the throttle. The expert runs in shadow mode as a **safety driver** (`src/safety.js`): if the
-network leaves its lane, points the wrong way, or hasn't braked 0.3 s after the expert would brake hard,
-the expert drives for 3 s and it counts as a takeover.
+network leaves its lane, points the wrong way, hasn't braked 0.3 s after the expert would brake hard, or
+sits still for 2.5 s when the expert would pull away, the expert drives for 3 s and it counts as a
+takeover. Training oversamples turns, lane changes, pulling away from a stop, hard braking and
+frames with an obstacle close ahead.
+
+**Two moments of the camera.** The network also sees the main camera 0.3 s earlier, through the same
+image encoder, so it can tell that a car ahead is getting closer. Its target speed comes from separate
+heads whose speed input is hidden in half the training samples (and it learns to estimate its own speed
+from the images), so it can't just copy the speed it's already going; the path heads always see the
+true speed, since waypoint spacing depends on it.
+
+**Traffic lights and obstacles.** A second, narrow camera (22°, pitched up) makes signal lamps a few
+pixels across instead of one. Besides the paths and speeds, the network predicts the state of the
+signal ahead, the distance to its stop line, and the gap to and speed of the obstacle on its path.
+When it is confident the light is red (or amber with room to stop) the target speed is capped to stop
+at the predicted line; with an obstacle output, the expert's car-following model (IDM) on the
+predicted gap caps it too. Both caps only ever lower the network's own speed. The obstacle output
+doesn't generalize well yet (gap error of ~±15-20 m for obstacles within 30 m on unseen roads), so
+the committed model is trained without it.
 
 **Neural** (`N`) shows the network's view: the camera frame with its attention map, its segmentation, a
 live chart of its steering against the expert's (shaded where the safety driver drove) and the takeover
@@ -130,11 +149,14 @@ without takeovers, meters of autonomous driving per takeover, contacts.
     npm run train                                                        # -> models/policy.onnx
     npm run collect -- --seeds 201,202,203 --frames 4000 --neural --noise 0   # DAgger data
     npm run collect -- --seeds 301,302,303 --frames 5000 --highway 0.8        # mostly highway
+    npm run collect -- --seeds 401,402,403 --frames 6000 --dense               # heavy traffic
     npm run train -- --init models/policy.pt --epochs 6                  # fine-tune on all of data/
-    npm run bench -- --seed 1 --out models/bench.json
+    npm run bench -- --seeds 1,2,3 --out models/bench.json               # three cities, combined
 
 `scripts/headless.mjs` runs the app in headless Chrome (set `CHROME=` if it isn't found), one browser per
-city seed. Everything also works from the UI: **Collect**, then `npm run train`, then **Neural** and
+city seed. A browser that loses its GPU context is restarted for the frames still owed, and
+uploads retry. Training saves `models/policy.last.pt` every epoch: `npm run train -- --resume` continues
+an interrupted run, and a data-loader failure after the machine sleeps restarts the epoch. Everything also works from the UI: **Collect**, then `npm run train`, then **Neural** and
 **Benchmark**.
 
 ## Test

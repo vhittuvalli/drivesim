@@ -471,22 +471,23 @@ export class City {
     armGeo.translate(-3.25, 5.9, 0);
     const poles = new THREE.InstancedMesh(mergeGeometries([poleGeo, armGeo]), this.mats.metal, n);
 
-    // Two heads per approach: overhead (on arm) and pole-mounted.
-    const headGeo = new THREE.BoxGeometry(0.34, 1.05, 0.28);
-    const backGeo = new THREE.BoxGeometry(0.6, 1.3, 0.03);
-    backGeo.translate(0, 0, 0.16);
-    const visorGeo = new THREE.CylinderGeometry(0.14, 0.14, 0.22, 12, 1, true, 0, Math.PI);
+    // Two heads per approach: overhead (on arm) and pole-mounted. 12-inch (30 cm) lenses, as on
+    // real arterial signals: with 8-inch ones a lit lamp was about one camera pixel at the line.
+    const headGeo = new THREE.BoxGeometry(0.44, 1.32, 0.3);
+    const backGeo = new THREE.BoxGeometry(0.76, 1.62, 0.03);
+    backGeo.translate(0, 0, 0.17);
+    const visorGeo = new THREE.CylinderGeometry(0.18, 0.18, 0.26, 12, 1, true, 0, Math.PI);
     visorGeo.rotateX(Math.PI / 2);
     visorGeo.rotateZ(Math.PI / 2);
     const visors = [];
-    for (const y of [0.33, 0, -0.33]) visors.push(visorGeo.clone().translate(0, y + 0.02, -0.24));
+    for (const y of [0.42, 0, -0.42]) visors.push(visorGeo.clone().translate(0, y + 0.02, -0.27));
     const housing = new THREE.InstancedMesh(mergeGeometries([headGeo, backGeo, ...visors]), this.mats.signalHousing, n * 2);
-    const lensGeo = new THREE.CircleGeometry(0.11, 16);
+    const lensGeo = new THREE.CircleGeometry(0.15, 16);
     lensGeo.rotateY(Math.PI);
     this.lamps = {};
     const lampMat = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false });
-    for (const [k, y] of [['red', 0.33], ['yellow', 0], ['green', -0.33]]) {
-      const g = lensGeo.clone().translate(0, y, -0.145);
+    for (const [k, y] of [['red', 0.42], ['yellow', 0], ['green', -0.42]]) {
+      const g = lensGeo.clone().translate(0, y, -0.155);
       this.lamps[k] = new THREE.InstancedMesh(g, lampMat, n * 2);
     }
 
@@ -521,7 +522,10 @@ export class City {
 
   // Called by the signal controller each frame.
   setSignalColors(stateOf) {
-    const on = { red: new THREE.Color(6, 0.35, 0.2), yellow: new THREE.Color(6, 3.2, 0.2), green: new THREE.Color(0.2, 5, 2.2) };
+    // Lit lamp colors, chosen through the ACES tone curve: brighter ones wash out toward white (at
+    // 6x a red lamp came out peach and green almost white), so these stay red, amber and green
+    // in the camera image by day and at night.
+    const on = { red: new THREE.Color(1.2, 0, 0), yellow: new THREE.Color(1.3, 0.45, 0), green: new THREE.Color(0, 1, 0.45) };
     const off = { red: new THREE.Color(0.08, 0.015, 0.01), yellow: new THREE.Color(0.08, 0.05, 0.01), green: new THREE.Color(0.01, 0.06, 0.03) };
     this.headApproach.forEach((k, idx) => {
       const ap = this.approaches[k];

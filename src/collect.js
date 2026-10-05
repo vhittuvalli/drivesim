@@ -1,18 +1,31 @@
 // Training-data collection, streamed to the dev server (scripts/serve.py writes data/<run>/):
 //   frames/NNNNNN.jpg   roof camera (what the network sees)
+//   tele/NNNNNN.jpg     traffic-light camera (narrow, looking up the road)
 //   labels/NNNNNN.png   semantic class (R) and depth (G) of the same view
 //   samples.jsonl       one line per frame: command, waypoints for every command branch, target
 //                       speed, and what was actually applied (see labels.js)
 // Labels always come from the expert, also while the neural driver is in control; that's
 // DAgger: the network's own mistakes get labeled with the expert's correction.
-import { makeLabels } from './labels.js';
+import { makeLabels, LABEL_VERSION } from './labels.js';
 
 const FLUSH_EVERY = 50;
 const MAX_IN_FLIGHT = 64;
 
-async function post(run, name, body, append = false) {
-  const r = await fetch(`/api/collect?run=${encodeURIComponent(run)}&name=${encodeURIComponent(name)}${append ? '&append=1' : ''}`, { method: 'POST', body });
-  if (!r.ok) throw new Error(`upload ${name}: ${r.status}`);
+// Uploads retry with backoff: under load (several browsers streaming two cameras each) single
+// requests fail with "Failed to fetch" and used to drop ~10% of a run. A retried append that had
+// in fact landed leaves a duplicate row, which the training loader drops.
+async function post(run, name, body, append = false, tries = 4) {
+  const url = `/api/collect?run=${encodeURIComponent(run)}&name=${encodeURIComponent(name)}${append ? '&append=1' : ''}`;
+  for (let i = 0; ; i++) {
+    try {
+      const r = await fetch(url, { method: 'POST', body });
+      if (r.ok) return;
+      if (r.status < 500 || i >= tries - 1) throw new Error(`upload ${name}: ${r.status}`);
+    } catch (e) {
+      if (i >= tries - 1) throw e;
+    }
+    await new Promise((res) => setTimeout(res, 500 * 2 ** i));
+  }
 }
 
 export class Collector {
@@ -64,14 +77,15 @@ export class Collector {
     this.rows = [];
   }
 
-  // rgb: the ImageData already rendered for this instant. info: {weather, hour, scenario}.
+  // rgb, tele: the camera images already rendered for this instant. info: {weather, hour, scenario}.
   // Returns whether a sample was taken (none while a human drives: no expert labels).
-  capture(world, rgb, info) {
+  capture(world, rgb, info, tele = null) {
     if (!this.active || world.manual || !world.expertCtrl) return false;
     const n = ++this.count, id = String(n).padStart(6, '0');
     const lab = makeLabels(world, world.expertCtrl);
     const c = world.ctrl ?? world.expertCtrl;
     this.sendBlob(`frames/${id}.jpg`, this.rig.encode(rgb, 'image/jpeg', 0.92));
+    if (tele) this.sendBlob(`tele/${id}.jpg`, this.rig.encode(tele, 'image/jpeg', 0.95));
     this.sendBlob(`labels/${id}.png`, this.rig.encode(this.rig.renderLabels(world.car), 'image/png'));
     const r2 = (v) => Math.round(v * 100) / 100;
     this.rows.push({
@@ -80,6 +94,7 @@ export class Collector {
       v_target: r2(lab.vTarget), acc: r2(world.expertCtrl.acc), reason: world.expertCtrl.reason ?? null, overtaking: lab.overtaking,
       steer: r2(c.steer), throttle: r2(c.throttle), driver: c.driver ?? 'expert', noise: r2(c.noise ?? 0),
       weather: info.weather, hour: r2(info.hour), scenario: info.scenario || null, road: lab.road, lane: lab.lane,
+      labels: LABEL_VERSION, wp_scale: r2(lab.wpScale), light: lab.light, lead_gap: r2(lab.lead.gap), lead_v: r2(lab.lead.v),
     });
     if (this.rows.length >= FLUSH_EVERY) this.flush();
     return true;

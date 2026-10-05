@@ -6,18 +6,42 @@
       128,
       256
     ],
+    "tele": [
+      1,
+      3,
+      128,
+      256
+    ],
     "speed": [
       1,
       1
+    ],
+    "past": [
+      1,
+      3,
+      128,
+      256
     ]
   },
+  "past_dt": 0.3,
   "image": "RGB, float in [0, 1], rows top to bottom (the roof camera, see src/sensor.js)",
+  "tele": "the traffic-light camera, same format (src/sensor.js TELE)",
+  "lights": [
+    "none",
+    "red",
+    "yellow",
+    "green"
+  ],
   "speed_units": "m/s",
   "outputs": [
     "waypoints",
     "v_target",
     "seg",
     "depth",
+    "light",
+    "stop_dist",
+    "lead",
+    "ego_speed",
     "attention"
   ],
   "commands": [
@@ -51,22 +75,33 @@
     "terrain"
   ],
   "depth_range": 100,
-  "onnx_check_max_abs_diff": 1.0728836059570312e-05,
-  "trained": "2026-09-30T22:25:38+00:00",
-  "frames": 67241,
-  "runs": 136,
+  "onnx_check_max_abs_diff": 2.09808349609375e-05,
+  "trained": "2026-10-05T03:29:41+00:00",
+  "frames": 127826,
+  "runs": 281,
   "drivers": {
-    "expert": 67227,
-    "neural": 14
+    "expert": 95765,
+    "neural": 25436,
+    "safety": 6625
   },
   "epoch": 6,
   "val": {
-    "wp": 0.0763,
-    "speed": 0.2789,
-    "seg": 0.2517,
-    "depth": 0.0252,
-    "lateral_at_8m": 0.0929,
-    "seg_acc": 0.9156
+    "wp": 0.1763,
+    "speed": 0.4683,
+    "seg": 0.3272,
+    "depth": 0.0306,
+    "light": 0.6463,
+    "stop": 1.7749,
+    "gap": 7.6444,
+    "lead_v": 0.6077,
+    "ego_speed": 1.2745,
+    "lateral_at_8m": 0.2358,
+    "seg_acc": 0.901,
+    "light_acc": 0.8758,
+    "signal_acc": 0.8162,
+    "stop_err": 2.3428,
+    "gap_err": 17.8971,
+    "veh_recall": 0.7632
   },
-  "init": "models/policy.pt"
+  "init": "/private/tmp/claude-501/-Users-varun-Desktop-Projects-drivesim/e608424b-26f5-4e4d-a486-8e7d84c54f65/scratchpad/split/policy.pt"
 }

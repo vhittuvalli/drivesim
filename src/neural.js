@@ -1,13 +1,23 @@
 // Neural driver: runs the trained policy (models/policy.onnx, see train/) in the browser with
-// ONNX Runtime Web and plugs into World.setPolicy(). The network sees the roof camera and the
-// car's speed; the route's next turn picks the command branch (conditional imitation learning).
+// ONNX Runtime Web and plugs into World.setPolicy(). The network sees the roof camera (and, if it
+// was trained with one, the traffic-light camera) and the car's speed; the route's next turn picks
+// the command branch (conditional imitation learning).
 //
 // Observations are taken at a fixed rate of simulation time and the simulation waits for each
 // answer (see due / waiting), so the driver behaves the same however long inference takes.
 // Between observations the predicted waypoints are held in world coordinates and followed with
 // pure pursuit; the predicted target speed sets the throttle.
-import { clamp, WHEELBASE, MAX_STEER } from './config.js';
-import { throttleFor } from './planner.js';
+//
+// Light-aware speed: networks with light and stop-line outputs read the signal ahead, but their
+// speed head didn't reliably act on it. When the network is confident the light is red (or amber
+// with room to stop), acceleration is capped so the car stops just short of the stop line the
+// network predicts, and the brake is held there. Everything the cap uses comes from the network.
+//
+// Lead-aware braking, the same idea for traffic: the network's speed head mostly copied the car's
+// own speed and braked late for cars ahead, so networks with a lead output (gap to the obstacle on
+// the path and its speed) get the expert's car-following model (IDM) as a second cap.
+import { clamp, WHEELBASE, MAX_STEER, conditions } from './config.js';
+import { throttleFor, idm, IDM } from './planner.js';
 import { commandOf, toEgo, TARGET_HORIZON, COMMANDS } from './labels.js';
 
 const ORT_VERSION = '1.30.0';
@@ -29,8 +39,9 @@ function smoothPath(pts, per = 4) {
 }
 
 // Pure pursuit along a path (car frame: x forward, y left) plus a speed target -> controls,
-// with the same geometry and actuator limits as the expert (planner.js).
-export function followPath(pts, v, vTarget) {
+// with the same geometry and actuator limits as the expert (planner.js). accCap: an upper bound on
+// the acceleration (light-aware speed), or null.
+export function followPath(pts, v, vTarget, accCap = null) {
   const Ld = 4 + 0.45 * v;
   let prev = [0, 0], tgt = null;
   for (const p of smoothPath(pts)) {
@@ -52,10 +63,40 @@ export function followPath(pts, v, vTarget) {
   // The label is clipped at 0 (labels.js), so a zero target understates hard braking at low
   // speed (a stop in well under the horizon): brake at least this firmly.
   if (vTarget < 0.3 && v > 0.3) acc = Math.min(acc, -Math.max(3, 2 * v));
+  if (accCap !== null) acc = Math.min(acc, accCap);
   acc = clamp(acc, -7.5, 3.2);
   let throttle = throttleFor(acc, v);
-  if (v < 0.5 && vTarget < 0.25) throttle = -0.5; // hold the brake instead of creeping
+  if (v < 0.5 && (vTarget < 0.25 || (accCap !== null && accCap <= 0))) throttle = -0.5; // hold the brake instead of creeping
   return { steer, throttle, acc, target: tgt };
+}
+
+export const LIGHT_STOP = { belief: 0.6, comfortDecel: 0.8, yellowDecel: 4.5, margin: 1, range: 50 };
+
+// Acceleration cap for a signal ahead believed red (or amber that we can stop for) whose stop line
+// is `d` meters past the front bumper, at speed v; null if there's nothing to stop for.
+export function lightCap(v, d, pRed, pYellow, belief = pRed + pYellow) {
+  if (!(d > -1 && d < LIGHT_STOP.range)) return null;
+  // Amber: stop only if a firm stop fits before the line (like the expert, planner.signalObstacle).
+  const canStop = (v * v) / (2 * LIGHT_STOP.yellowDecel) < d + 0.5;
+  const pStop = pRed + (canStop ? pYellow : 0);
+  if (belief < LIGHT_STOP.belief || pStop < LIGHT_STOP.belief) return null;
+  const room = Math.max(d - LIGHT_STOP.margin, 0.3);
+  const need = -(v * v) / (2 * room); // constant deceleration that stops at the margin
+  // Far enough away: just don't speed up toward the light; brake once it takes real deceleration.
+  return need > -LIGHT_STOP.comfortDecel ? Math.min(0, need) : need;
+}
+
+export const LEAD = { range: 60, brake: -0.3, maxValErr: 5 }; // maxValErr: m, gap error within 30 m on validation
+
+// Acceleration cap from the predicted obstacle ahead: IDM toward it (with the grip-adjusted
+// parameters every driver uses), applied only when it calls for braking. v0 is what the network
+// would like to drive; a clear road (gap at or beyond range) has no cap.
+export function leadCap(v, gap, leadV, v0) {
+  if (!(gap < LEAD.range)) return null;
+  const g = conditions.grip;
+  const p = g === 1 ? IDM : { ...IDM, T: IDM.T / g, b: IDM.b * g, a: IDM.a * Math.min(1, g * 1.3) };
+  const a = idm(v, Math.max(v0, v + 1, 1), Math.max(gap, 0.05), Math.max(0, leadV), p);
+  return a < LEAD.brake ? a : null;
 }
 
 // ImageData (RGBA, rows top to bottom) -> float32 CHW in [0, 1].
@@ -76,6 +117,10 @@ export class NeuralDriver {
     this.meta = null;
     this.commands = COMMANDS; // order of the network's command branches
     this.inferMs = 0;
+    this.usesTele = false;
+    this.pastDt = null;
+    this.lightAware = true; // apply the light-aware speed cap when the network has light outputs
+    this.leadAware = true; // and the lead-aware braking cap when it has a lead output
     this.reset();
   }
 
@@ -95,6 +140,11 @@ export class NeuralDriver {
     this.session = await ort.InferenceSession.create(`${base}.onnx`, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
     this.commands = this.meta.commands;
     [, , this.inH, this.inW] = this.meta.inputs.image;
+    this.usesTele = !!this.meta.inputs.tele;
+    this.pastDt = this.meta.inputs.past ? this.meta.past_dt ?? 0.3 : null; // seconds; null: single-frame network
+    // Only brake on the lead output if it was accurate on held-out data (it has been off by 15-20 m).
+    const gapErr = this.meta.val?.gap_err;
+    this.leadAware = gapErr !== undefined && gapErr < LEAD.maxValErr;
     return this.meta;
   }
 
@@ -104,6 +154,8 @@ export class NeuralDriver {
     this.pending = false;
     this.nextObs = -Infinity;
     this.error = null;
+    this.stopBelief = 0; // smoothed P(red or amber) over observations
+    this.history = []; // {t, image}: recent camera frames, for networks that also see an earlier one
   }
 
   // The simulation must not step past this time without a fresh observation.
@@ -116,9 +168,10 @@ export class NeuralDriver {
     return this.ready && !this.pending && t >= this.nextObs;
   }
 
-  // Run the network on `rgb` (the roof camera at the car's current pose). Resolves when the
-  // prediction is in place; the simulation stays paused until then.
-  async observe(world, rgb) {
+  // Run the network on `rgb` (the roof camera at the car's current pose) and `tele` (the
+  // traffic-light camera, for networks that use it). Resolves when the prediction is in place;
+  // the simulation stays paused until then.
+  async observe(world, rgb, tele = null) {
     const { car, expert } = world;
     const pose = { x: car.x, z: car.z, h: car.h }, t = world.t, v = car.v;
     const cmd = commandOf(expert.route, expert.s).kind;
@@ -127,14 +180,35 @@ export class NeuralDriver {
     const t0 = performance.now();
     try {
       const { Tensor } = this.ort;
-      const out = await this.session.run({
+      const feeds = {
         image: new Tensor('float32', toTensorData(rgb), [1, 3, this.inH, this.inW]),
         speed: new Tensor('float32', Float32Array.of(v), [1, 1]),
-      });
+      };
+      if (this.usesTele) feeds.tele = new Tensor('float32', toTensorData(tele), [1, 3, ...this.meta.inputs.tele.slice(2)]);
+      if (this.pastDt !== null) {
+        // The frame closest to pastDt ago (observations are 0.1 s apart); the current one at first.
+        let past = rgb, best = 0.06;
+        for (const h of this.history) {
+          const err = Math.abs(t - this.pastDt - h.t);
+          if (err <= best) (best = err), (past = h.image);
+        }
+        feeds.past = new Tensor('float32', toTensorData(past), [1, 3, this.inH, this.inW]);
+        this.history.push({ t, image: rgb });
+        while (this.history.length && this.history[0].t < t - 1) this.history.shift();
+      }
+      const out = await this.session.run(feeds);
+      // Probabilities for the light ahead (networks trained with the traffic-light camera).
+      let light = null;
+      if (out.light) {
+        const z = Array.from(out.light.data), m = Math.max(...z), e = z.map((x) => Math.exp(x - m)), sum = e.reduce((a, b) => a + b, 0);
+        light = Object.fromEntries(this.meta.lights.map((k, i) => [k, e[i] / sum]));
+      }
       const wp = out.waypoints.data, nWp = this.meta.n_waypoints;
       const branches = this.commands.map((_, k) => Array.from({ length: nWp }, (_, i) => [wp[(k * nWp + i) * 2], wp[(k * nWp + i) * 2 + 1]]));
       this.setPrediction(pose, cmd, branches, Array.from(out.v_target.data), {
-        t, v, seg: out.seg.data, segDims: out.seg.dims, attention: out.attention.data, attnDims: out.attention.dims, image: rgb,
+        t, v, seg: out.seg.data, segDims: out.seg.dims, attention: out.attention.data, attnDims: out.attention.dims, image: rgb, tele, light,
+        stopDist: out.stop_dist ? out.stop_dist.data[0] : null,
+        lead: out.lead ? { gap: out.lead.data[0], v: out.lead.data[1] } : null,
       });
       for (const k of Object.keys(out)) out[k].dispose?.();
       const ms = performance.now() - t0;
@@ -152,6 +226,8 @@ export class NeuralDriver {
   setPrediction(pose, cmd, branches, vTarget, extra = {}) {
     const c = Math.cos(pose.h), s = Math.sin(pose.h);
     const paths = branches.map((pts) => pts.map(([x, y]) => ({ x: pose.x + x * c + y * s, z: pose.z + x * s - y * c })));
+    // One noisy frame shouldn't stop the car (or release it): smooth the light over observations.
+    if (extra.light) this.stopBelief = 0.5 * this.stopBelief + 0.5 * (extra.light.red + extra.light.yellow);
     this.pred = { pose, cmd, cmdIndex: this.commands.indexOf(cmd), paths, vTarget, ...extra };
   }
 
@@ -166,7 +242,18 @@ export class NeuralDriver {
     if (!p) return null;
     const car = world.car;
     const pts = this.path.map((q) => toEgo(car, q.x, q.z));
-    const out = followPath(pts, car.v, p.vTarget[p.cmdIndex]);
-    return { steer: out.steer, throttle: out.throttle, acc: out.acc, cmd: p.cmd, vTarget: p.vTarget[p.cmdIndex] };
+    const traveled = toEgo(p.pose, car.x, car.z)[0]; // since the observation
+    let light = null, lead = null;
+    if (this.lightAware && p.light && p.stopDist !== null && p.stopDist !== undefined) {
+      light = lightCap(car.v, p.stopDist - traveled, p.light.red, p.light.yellow, this.stopBelief);
+    }
+    if (this.leadAware && p.lead) {
+      // The gap shrinks by our travel and grows by the lead's since the observation.
+      const age = Math.max(0, (world.t ?? p.t ?? 0) - (p.t ?? 0));
+      lead = leadCap(car.v, p.lead.gap - traveled + p.lead.v * age, p.lead.v, p.vTarget[p.cmdIndex]);
+    }
+    const caps = [light, lead].filter((c) => c !== null), cap = caps.length ? Math.min(...caps) : null;
+    const out = followPath(pts, car.v, p.vTarget[p.cmdIndex], cap);
+    return { steer: out.steer, throttle: out.throttle, acc: out.acc, cmd: p.cmd, vTarget: p.vTarget[p.cmdIndex], lightStop: light !== null, leadBrake: lead !== null };
   }
 }

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { mulberry32, clamp } from '../src/config.js';
 import { World } from '../src/sim.js';
 import { HW, HW_LENGTH, centerAt, lanePoint, laneOffset, highwayPose } from '../src/highway.js';
-import { makeLabels, commandOf } from '../src/labels.js';
+import { makeLabels, commandOf, COMMANDS, WP_DIST } from '../src/labels.js';
 import { Car, FakeFleet, inFootprint } from './helpers.js';
 
 const world = (seed, highway = 60) => {
@@ -93,7 +93,8 @@ test('highway labels: commands are lane changes; left/right branches move over o
     }
   }
   assert.ok(straight > 60 && changing > 0, `straight ${straight}, changing ${changing}`);
-  assert.ok(spread > 0.2, `lane-change branches differ from the lane by ${spread.toFixed(2)} m`);
+  // Waypoints spread out with speed, so the lane change shows clearly at the far end.
+  assert.ok(spread > 1.2, `lane-change branches differ from the lane by ${spread.toFixed(2)} m`);
 });
 
 test('highway: hand back from manual driving, merging from the shoulder', () => {
@@ -143,4 +144,35 @@ test('highway: a preferred lane moves the expert there, and back right without o
   for (let t = 0; t < 40 * 60 && w.expert.route.lane !== 2; t++) w.step(1 / 60);
   assert.equal(w.expert.route.lane, 2, 'kept right again');
   assert.equal(w.contacts, 0);
+});
+
+test('highway labels: waypoints reach further ahead at speed', () => {
+  const w = world(8, 0);
+  for (let t = 0; t < 20 * 60; t++) w.step(1 / 60);
+  const L = makeLabels(w, w.expertCtrl), last = L.wp.straight[WP_DIST.length - 1][0];
+  assert.ok(w.car.v > 25, `cruising: ${w.car.v.toFixed(1)} m/s`);
+  assert.ok(Math.abs(last - (WP_DIST[WP_DIST.length - 1] * w.car.v) / 12) < 2, `last waypoint ${last.toFixed(1)} m ahead`);
+});
+
+// The oracle test from neural.test.js on the highway: predictions that equal the labels,
+// observed at 10 Hz, must drive at highway speed and through lane changes without takeovers.
+test('highway neural driver: perfect predictions keep the lane and change lanes on command', async () => {
+  const { NeuralDriver } = await import('../src/neural.js');
+  const w = world(9, 60), nn = new NeuralDriver({ hz: 10 });
+  slowTruck(w);
+  w.setPolicy(nn);
+  let changes = 0, lane = w.expert.route.lane;
+  for (let t = 0; t < 90 * 60; t++) {
+    if (w.t >= nn.nextObs && w.expertCtrl) {
+      const L = makeLabels(w, w.expertCtrl);
+      nn.setPrediction(w.car, L.command, COMMANDS.map((k) => L.wp[k] ?? L.wp[L.command]), COMMANDS.map(() => L.vTarget));
+      nn.nextObs = w.t + nn.period;
+    }
+    w.step(1 / 60);
+    if (w.expert.route.lane !== lane) (changes++), (lane = w.expert.route.lane);
+  }
+  assert.equal(w.contacts, 0);
+  assert.ok(changes >= 2, `lane changes: ${changes}`);
+  assert.ok(w.safety.autoDist > 1500, `drove ${w.safety.autoDist.toFixed(0)} m`);
+  assert.ok(w.safety.disengagements <= 1, JSON.stringify(w.safety.events.map((e) => e.reason)));
 });
