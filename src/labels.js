@@ -21,7 +21,10 @@ export const WP_SCALE_SPEED = 12; // m/s
 export const wpScale = (v) => Math.max(1, v / WP_SCALE_SPEED);
 // Samples carry this; training drops version-1 rows above WP_SCALE_SPEED (fixed spacing).
 export const LABEL_VERSION = 4; // 3: light label and the traffic-light camera frame; 4: lead obstacle
-export const COMMANDS = ['left', 'straight', 'right'];
+// 'overtake': the expert has decided to pass a stopped or slow vehicle through the oncoming lane
+// (it checks that the lane is clear, the network can't). Like a turn or a lane change, it's a
+// decision handed to the network, which then has to drive the pass.
+export const COMMANDS = ['left', 'straight', 'right', 'overtake'];
 // The signal for our approach, as an auxiliary target that teaches the network to look at it:
 // 'none' when there is no stop line within LIGHT_RANGE (or we're past it).
 export const LIGHTS = ['none', 'red', 'yellow', 'green'];
@@ -51,9 +54,11 @@ export const CLASSES = ['sky', 'road', 'marking', 'sidewalk', 'building', 'veget
 export const DEPTH_RANGE = 100;
 
 // The command for the intersection we're approaching, or still crossing (on the highway: the
-// lane change in progress).
-export function commandOf(route, s) {
+// lane change in progress; in the city, an overtake in progress when the expert's overtaker `ot`
+// is given).
+export function commandOf(route, s, ot = null) {
   if (route.highway) return route.commandAt(s);
+  if (ot?.active) return { kind: 'overtake', dist: 0 };
   for (const st of route.stops) {
     // The box ends ROAD_W past the intersection entry, which is (STOP_LINE - ROAD_W/2) past the line.
     if (st.s + STOP_LINE - ROAD_W / 2 + ROAD_W > s) return { kind: st.turn ?? 'straight', dist: st.s - s };
@@ -104,13 +109,13 @@ function laneChangeWaypoints(route, q, pose, from, lane, v) {
 export function makeLabels(world, exp) {
   const { expert, car } = world;
   const route = expert.route, s = expert.s;
-  const cmd = commandOf(route, s);
+  const cmd = commandOf(route, s, expert.ot);
   const vTarget = Math.min(MAX_TARGET_SPEED, Math.max(0, car.v + exp.acc * TARGET_HORIZON));
   const scale = wpScale(car.v);
   const lead = leadOf(exp, car.v);
   if (route.highway) {
     const taken = pathWaypoints(route, s, car, null, expert.k, scale);
-    const wp = { left: null, straight: null, right: null };
+    const wp = { left: null, straight: null, right: null, overtake: null };
     wp[cmd.kind] = taken;
     // The lane the path is in here (route.lane is already the target once a change is planned).
     const q = route.qAt(s, expert.k), lane = laneOf(route.latAt(q));
@@ -122,11 +127,11 @@ export function makeLabels(world, exp) {
   }
   const overtaking = !!expert.ot.active;
   const taken = pathWaypoints(route, s, car, overtaking ? expert.ot.offsetAt : null, expert.k, scale);
-  const wp = { left: null, straight: null, right: null };
+  const wp = { left: null, straight: null, right: null, overtake: null };
   wp[cmd.kind] = taken;
   const horizon = WP_DIST[WP_DIST.length - 1] * scale + 6;
   for (const kind of COMMANDS) {
-    if (kind === cmd.kind || overtaking) continue;
+    if (kind === cmd.kind || overtaking || kind === 'overtake') continue;
     // Far from the intersection every branch just follows the lane.
     wp[kind] = cmd.dist > horizon ? taken : branchWaypoints(car, kind, scale);
   }

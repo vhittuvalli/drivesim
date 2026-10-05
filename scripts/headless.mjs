@@ -29,6 +29,7 @@ const { positionals, values: opt } = parseArgs({
     noise: { type: 'string', default: '0.5' },
     highway: { type: 'string', default: '0.3' }, // share of collection episodes on the highway
     dense: { type: 'boolean', default: false }, // heavy traffic in every episode
+    fog: { type: 'string' }, // share of episodes in fog
     neural: { type: 'boolean', default: false },
     parallel: { type: 'string', default: '3' },
     seed: { type: 'string', default: '1' },
@@ -92,7 +93,7 @@ async function collect() {
   const one = async (seed) => {
     let left = Number(opt.frames), restarts = 0;
     while (left > 0) {
-      const q = `seed=${seed}&collect=${left}&noise=${opt.noise}&hwshare=${opt.highway}&speed=8&fx=0${opt.neural ? '&neural=1' : ''}${opt.dense ? '&dense=1' : ''}`;
+      const q = `seed=${seed}&collect=${left}&noise=${opt.noise}&hwshare=${opt.highway}&speed=8&fx=0${opt.neural ? '&neural=1' : ''}${opt.dense ? '&dense=1' : ''}${opt.fog ? `&fog=${opt.fog}` : ''}`;
       const b = await open(q);
       let st;
       try {
