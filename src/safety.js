@@ -10,8 +10,8 @@ import { angleWrap } from './planner.js';
 export const TAKEOVER_SECONDS = 3;
 
 export class SafetyDriver {
-  constructor({ maxLateral = 1.1, maxHeading = 0.45, brakeDemand = -3, brakeGrace = 0.3, stallGrace = 2.5, ttcMin = 2, ttcGrace = 0.2 } = {}) {
-    Object.assign(this, { maxLateral, maxHeading, brakeDemand, brakeGrace, stallGrace, ttcMin, ttcGrace });
+  constructor({ maxLateral = 1.1, maxHeading = 0.45, brakeDemand = -3, brakeGrace = 0.3, stallGrace = 2.5, ttcMin = 2, ttcGrace = 0.2, maxLateralOvertake = 1.5 } = {}) {
+    Object.assign(this, { maxLateral, maxHeading, brakeDemand, brakeGrace, stallGrace, ttcMin, ttcGrace, maxLateralOvertake });
     this.enabled = true;
     this.reset();
   }
@@ -21,6 +21,7 @@ export class SafetyDriver {
     this.underBraking = 0; // seconds the learned driver has been braking less than the expert wants
     this.stalled = 0; // seconds stopped while the expert wants to drive off
     this.closing = 0; // seconds under ttcMin while braking less than the expert
+    this.overtakeEnd = -Infinity; // when the expert last had an overtake in progress
     this.events = []; // {t, reason, x, z}
     this.autoDist = 0; // meters driven by the learned driver
     this.totalDist = 0;
@@ -38,7 +39,12 @@ export class SafetyDriver {
   // Why the expert should take over right now, or null.
   check(world, exp, nn, dt = 0) {
     const { expert, car } = world;
-    if (Math.abs(expert.lateral) > this.maxLateral) return 'left the lane';
+    // During an overtake (the expert checked the oncoming lane is clear) the path itself swings
+    // across; a 10 Hz driver following it trails the merge back by ~1.1 m even with perfect
+    // predictions, so allow a little more there, and for a second after while it settles.
+    if (expert.ot?.active) this.overtakeEnd = world.t;
+    const maxLateral = world.t - this.overtakeEnd < 1 ? this.maxLateralOvertake : this.maxLateral;
+    if (Math.abs(expert.lateral) > maxLateral) return 'left the lane';
     // Heading of the intended path here, including the swerve of an overtake.
     const p = expert.route.at(expert.s, expert.k), off = expert.ot.offsetAt;
     const pathH = p.h - Math.atan((off(expert.s + 1) - off(expert.s - 1)) / 2);
