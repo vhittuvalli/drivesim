@@ -13,6 +13,8 @@ Each sample: roof-camera image, current speed, and targets:
 """
 import json
 import os
+import re
+import zlib
 
 import numpy as np
 import torch
@@ -128,13 +130,23 @@ def load_runs(root):
     return runs
 
 
+def city_of(run):
+    """The city seed in a run name (data/<stamp>-s<seed>-<driver>-e<episode>), or the run itself."""
+    m = re.search(r'-s(\d+)-', run)
+    return m.group(1) if m else run
+
+
 def split(runs, val_frac=0.1, block=200):
-    """Train/val split. By run when there are enough runs (different cities and conditions), else by
-    contiguous blocks of frames so neighbouring, near-identical frames don't leak across."""
+    """Train/val split. By city when there are enough runs: a city goes to validation by a stable
+    hash of its seed, so validation is always cities the network never trained on, and adding data
+    never moves a city from one side to the other (the old every-Nth-run split did, and then scored
+    fine-tuned models on runs an earlier stage had trained on). Few runs: contiguous blocks of
+    frames, so neighbouring, near-identical frames don't leak across."""
     names = sorted(runs)
     if len(names) >= 5:
-        n_val = max(1, round(len(names) * val_frac))
-        val = set(names[::max(1, len(names) // n_val)][:n_val])
+        val = {run for run in names if zlib.crc32(city_of(run).encode()) % round(1 / val_frac) == 0}
+        if not val or len(val) == len(names):  # degenerate hash outcome on tiny datasets
+            val = set(names[:: max(2, round(1 / val_frac))])
         pick = lambda run, i: run in val
     else:
         every = max(2, round(1 / val_frac))
