@@ -40,11 +40,12 @@ export class SafetyDriver {
   check(world, exp, nn, dt = 0) {
     const { expert, car } = world;
     // During an overtake (the expert checked the oncoming lane is clear) the path itself swings
-    // across; a 10 Hz driver following it trails the merge back by ~1.1 m even with perfect
-    // predictions, so allow a little more there, and for a second after while it settles.
+    // across; a 10 Hz driver following it trails the merge back by ~1.1 m to the left even with
+    // perfect predictions, so allow a little more there, and for a second after while it settles.
+    // Only to the left (lateral < 0): to the right are parked cars, and 1.5 m that way is contact.
     if (expert.ot?.active) this.overtakeEnd = world.t;
-    const maxLateral = world.t - this.overtakeEnd < 1 ? this.maxLateralOvertake : this.maxLateral;
-    if (Math.abs(expert.lateral) > maxLateral) return 'left the lane';
+    const lenient = world.t - this.overtakeEnd < 1 && expert.lateral < 0;
+    if (Math.abs(expert.lateral) > (lenient ? this.maxLateralOvertake : this.maxLateral)) return 'left the lane';
     // Heading of the intended path here, including the swerve of an overtake.
     const p = expert.route.at(expert.s, expert.k), off = expert.ot.offsetAt;
     const pathH = p.h - Math.atan((off(expert.s + 1) - off(expert.s - 1)) / 2);

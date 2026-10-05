@@ -271,3 +271,14 @@ test('time-to-collision cap: brakes in proportion to closing speed, not for movi
   const cutIn = ttcCap(26.5, 5.5 / 12, 21); // cut-in 12 m ahead, 5.5 m/s slower: needs ~1.3 m/s^2
   assert.ok(cutIn < -1.2 && cutIn > -3, `cut-in: ${cutIn}`);
 });
+
+test('safety driver: drifting right during an overtake is taken over before touching parked cars', () => {
+  for (const seed of [1, 2, 3]) {
+    const w = world(seed, { cars: 0, peds: 0 });
+    // Follows the expert but pulls steadily right once the expert is passing.
+    w.setPolicy({ control: (world, exp) => ({ steer: exp.steer + (world.expert.ot.active ? 0.06 : 0), throttle: exp.throttle }) });
+    const run = w.startScenario('overtake-slow');
+    while (run.status === 'running') w.step(1 / 60);
+    assert.equal(w.contacts, 0, `seed ${seed}: ${run.message}`);
+  }
+});
