@@ -227,3 +227,47 @@ test('safety driver: a late braker closing on a highway jam is taken over in tim
   }
   assert.ok(risk >= 1, `collision-risk takeovers: ${risk}`);
 });
+
+test('overtake command: labeled while the expert passes, and drivable from perfect predictions', async () => {
+  const { NeuralDriver } = await import('../src/neural.js');
+  for (const seed of [1, 2]) {
+    const w = world(seed, { cars: 0, peds: 0 });
+    const run = w.startScenario('overtake-parked');
+    let overtakeFrames = 0;
+    while (run.status === 'running') {
+      w.step(1 / 60);
+      const L = makeLabels(w, w.expertCtrl);
+      if (L.command === 'overtake') {
+        overtakeFrames++;
+        assert.ok(L.wp.overtake && !L.wp.straight && L.overtaking);
+      } else assert.equal(L.wp.overtake, null);
+    }
+    assert.equal(run.status, 'passed');
+    assert.ok(overtakeFrames > 60, `overtake frames ${overtakeFrames}`);
+  }
+  // The oracle network: the command picks the overtake branch and the car passes with no takeover.
+  const w = world(3, { cars: 0, peds: 0 }), nn = new NeuralDriver({ hz: 10 });
+  nn.commands = COMMANDS;
+  const run = w.startScenario('overtake-parked');
+  w.setPolicy(nn);
+  while (run.status === 'running') {
+    if (w.t >= nn.nextObs && w.expertCtrl) {
+      const L = makeLabels(w, w.expertCtrl);
+      nn.setPrediction(w.car, L.command, COMMANDS.map((k) => L.wp[k] ?? L.wp[L.command]), COMMANDS.map(() => L.vTarget));
+      nn.nextObs = w.t + nn.period;
+    }
+    w.step(1 / 60);
+  }
+  assert.equal(run.status, 'passed', run.message);
+  assert.equal(w.safety.disengagements, 0, JSON.stringify(w.safety.events.map((e) => e.reason)));
+});
+
+test('time-to-collision cap: brakes in proportion to closing speed, not for moving traffic', async () => {
+  const { ttcCap } = await import('../src/neural.js');
+  assert.equal(ttcCap(10, 0.2, 0), null, 'TTC 5 s: no cap');
+  assert.equal(ttcCap(10, 0.8, 9.5), null, 'barely closing');
+  const stopped = ttcCap(9, 9 / 14, 0); // 14 m behind a stopped car at 9 m/s: needs ~2.9 m/s^2
+  assert.ok(stopped < -3.5 && stopped > -6, `stopped lead: ${stopped}`);
+  const cutIn = ttcCap(26.5, 5.5 / 12, 21); // cut-in 12 m ahead, 5.5 m/s slower: needs ~1.3 m/s^2
+  assert.ok(cutIn < -1.2 && cutIn > -3, `cut-in: ${cutIn}`);
+});
