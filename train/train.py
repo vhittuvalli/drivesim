@@ -150,18 +150,11 @@ def main():
         missing, _ = model.load_state_dict(init, strict=False)
         if missing:
             print(f'new layers (not in {a.init}): {sorted({k.split(".")[0] for k in missing})}')
-        # Fill in only the heads the checkpoint doesn't have. Target-speed heads (split off the
-        # combined heads) start from the combined heads' speed output; the overtake branch (added
-        # later) starts from the trained straight branch.
+        # Fill in only the heads the checkpoint doesn't have: target-speed heads (split off the
+        # combined heads) start from the combined heads' speed output.
         gone = lambda prefix: any(k.startswith(prefix) for k in missing)
         with torch.no_grad():
             for i, (h, sh) in enumerate(zip(model.heads, model.speed_heads)):
-                if i == 3 and gone('heads.3.'):
-                    h.load_state_dict(model.heads[1].state_dict())
-                    if not gone('speed_heads.1.'):
-                        sh.load_state_dict(model.speed_heads[1].state_dict())
-                        print('overtake branch initialized from the straight branch')
-                        continue
                 if gone(f'speed_heads.{i}.'):
                     sh[0].load_state_dict(h[0].state_dict())
                     sh[2].weight.copy_(h[2].weight[-1:])

@@ -21,9 +21,16 @@
       3,
       128,
       256
+    ],
+    "past2": [
+      1,
+      3,
+      128,
+      256
     ]
   },
   "past_dt": 0.3,
+  "past2_dt": 1.0,
   "image": "RGB, float in [0, 1], rows top to bottom (the roof camera, see src/sensor.js)",
   "tele": "the traffic-light camera, same format (src/sensor.js TELE)",
   "lights": [
@@ -42,6 +49,7 @@
     "stop_dist",
     "lead",
     "ego_speed",
+    "ttc_inv",
     "attention"
   ],
   "commands": [
@@ -75,33 +83,36 @@
     "terrain"
   ],
   "depth_range": 100,
-  "onnx_check_max_abs_diff": 1.52587890625e-05,
-  "trained": "2026-10-05T07:58:53+00:00",
-  "frames": 138366,
-  "runs": 304,
+  "onnx_check_max_abs_diff": 1.239776611328125e-05,
+  "trained": "2026-10-06T06:26:23+00:00",
+  "frames": 176486,
+  "runs": 375,
   "drivers": {
-    "expert": 95765,
-    "neural": 34737,
-    "safety": 7864
+    "expert": 102707,
+    "neural": 61766,
+    "safety": 12013
   },
-  "epoch": 6,
+  "epoch": 3,
   "val": {
-    "wp": 0.1775,
-    "speed": 0.4292,
-    "seg": 0.3338,
-    "depth": 0.0304,
-    "light": 0.6043,
-    "stop": 1.6625,
-    "gap": 5.2507,
-    "lead_v": 0.6157,
-    "ego_speed": 1.1922,
-    "lateral_at_8m": 0.2404,
-    "seg_acc": 0.8987,
-    "light_acc": 0.8864,
-    "signal_acc": 0.8264,
-    "stop_err": 2.2574,
-    "gap_err": 11.0651,
-    "veh_recall": 0.7692
+    "wp": 0.1134,
+    "speed": 0.4382,
+    "seg": 0.323,
+    "depth": 0.0309,
+    "light": 0.6952,
+    "stop": 1.5412,
+    "gap": 10.0395,
+    "lead_v": 0.5525,
+    "ego_speed": 0.8441,
+    "ttc": 0.015,
+    "lateral_at_8m": 0.1359,
+    "seg_acc": 0.8977,
+    "light_acc": 0.8478,
+    "signal_acc": 0.8188,
+    "stop_err": 1.683,
+    "gap_err": 17.6435,
+    "veh_recall": 0.7985,
+    "ttc_recall": 0.7191,
+    "ttc_precision": 0.7442
   },
-  "init": "/private/tmp/claude-501/-Users-varun-Desktop-Projects-drivesim/e608424b-26f5-4e4d-a486-8e7d84c54f65/scratchpad/city/init.pt"
+  "init": "/private/tmp/claude-501/-Users-varun-Desktop-Projects-drivesim/e608424b-26f5-4e4d-a486-8e7d84c54f65/scratchpad/bd/c2.pt"
 }

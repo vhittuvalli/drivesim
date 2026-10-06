@@ -27,7 +27,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-N_CMD, N_WP, N_CLASSES, N_LIGHTS = 4, 8, 11, 4  # commands: left, straight, right, overtake
+N_CMD, N_WP, N_CLASSES, N_LIGHTS = 3, 8, 11, 4  # commands: left, straight, right
 # Segmentation class weights (classes as in src/labels.js): vehicles and pedestrians are a few
 # percent of the pixels but are what braking depends on; traffic lights are tiny too.
 SEG_WEIGHTS = torch.ones(N_CLASSES)

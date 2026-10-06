@@ -103,7 +103,9 @@ export function leadCap(v, gap, leadV, v0) {
 // their path, which two frames show as looming (scale-free, unlike the gap, which they still get
 // wrong by ~10 m), and the lead's speed (accurate to ~0.5 m/s). From those: the closing speed, and
 // the deceleration that stops the closing before contact (closing * 1/TTC / 2), with a margin.
-export const TTC = { danger: 0.4, margin: 1.5, minClosing: 1, minRecall: 0.6, minPrecision: 0.6 };
+// The gate is strict: at 75% recall and 73% precision the cap added 14 takeovers (8 of them late
+// braking) to the same network without it, braking for false alarms and too gently for real ones.
+export const TTC = { danger: 0.4, margin: 1.5, minClosing: 1, minRecall: 0.9, minPrecision: 0.9 };
 
 export function ttcCap(v, ttcInv, leadV) {
   if (!(ttcInv > TTC.danger)) return null;
@@ -194,9 +196,7 @@ export class NeuralDriver {
   async observe(world, rgb, tele = null) {
     const { car, expert } = world;
     const pose = { x: car.x, z: car.z, h: car.h }, t = world.t, v = car.v;
-    // Networks trained before the overtake command follow the lane branch while passing.
-    const want = commandOf(expert.route, expert.s, expert.ot).kind;
-    const cmd = this.commands.includes(want) ? want : 'straight';
+    const cmd = commandOf(expert.route, expert.s).kind;
     this.pending = true;
     this.nextObs = t + this.period;
     const t0 = performance.now();
