@@ -13,7 +13,7 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from dataset import COMMANDS, LIGHTS, PAST_DT  # noqa: E402
+from dataset import COMMANDS, LIGHTS, PAST2_DT, PAST_DT  # noqa: E402
 from model import IMAGE_SIZE, N_WP, Policy  # noqa: E402
 
 OUTPUTS = ['waypoints', 'v_target', 'seg', 'depth', 'light', 'stop_dist', 'lead', 'ego_speed', 'ttc_inv', 'attention']
@@ -28,25 +28,28 @@ def export(model, base, info=None):
     tele = torch.rand(1, 3, h, w)
     speed = torch.tensor([[5.0]])
     past = torch.rand(1, 3, h, w)
+    past2 = torch.rand(1, 3, h, w)
     onnx_path = base + '.onnx'
+    names = ['image', 'tele', 'speed', 'past', 'past2']
     torch.onnx.export(
-        model, (image, tele, speed, past), onnx_path, input_names=['image', 'tele', 'speed', 'past'], output_names=OUTPUTS,
-        dynamic_axes={n: {0: 'batch'} for n in ['image', 'tele', 'speed', 'past', *OUTPUTS]}, opset_version=17, dynamo=False,
+        model, (image, tele, speed, past, past2), onnx_path, input_names=names, output_names=OUTPUTS,
+        dynamic_axes={n: {0: 'batch'} for n in [*names, *OUTPUTS]}, opset_version=17, dynamo=False,
     )
 
     import onnxruntime as ort
 
     sess = ort.InferenceSession(onnx_path, providers=['CPUExecutionProvider'])
-    got = sess.run(None, {'image': image.numpy(), 'tele': tele.numpy(), 'speed': speed.numpy(), 'past': past.numpy()})
+    got = sess.run(None, {'image': image.numpy(), 'tele': tele.numpy(), 'speed': speed.numpy(), 'past': past.numpy(), 'past2': past2.numpy()})
     with torch.no_grad():
-        want = [t.numpy() for t in model(image, tele, speed, past)]
+        want = [t.numpy() for t in model(image, tele, speed, past, past2)]
     worst = max(float(np.abs(a - b).max()) for a, b in zip(got, want))
     if worst > 1e-3:
         raise SystemExit(f'ONNX output differs from PyTorch by {worst}')
 
     meta = {
-        'inputs': {'image': [1, 3, h, w], 'tele': [1, 3, h, w], 'speed': [1, 1], 'past': [1, 3, h, w]},
+        'inputs': {'image': [1, 3, h, w], 'tele': [1, 3, h, w], 'speed': [1, 1], 'past': [1, 3, h, w], 'past2': [1, 3, h, w]},
         'past_dt': PAST_DT,
+        'past2_dt': PAST2_DT,
         'image': 'RGB, float in [0, 1], rows top to bottom (the roof camera, see src/sensor.js)',
         'tele': 'the traffic-light camera, same format (src/sensor.js TELE)',
         'lights': LIGHTS,
