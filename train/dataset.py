@@ -22,16 +22,18 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-COMMANDS = ['left', 'straight', 'right', 'overtake']  # must match src/labels.js
+COMMANDS = ['left', 'straight', 'right']  # must match src/labels.js
 
 
-def overtake_command(r):
-    """Rows from before the overtake command: an expert overtake (labeled with the next turn's
-    command and the offset path) becomes the 'overtake' command with that path."""
-    if r.get('overtaking') and r['command'] != 'overtake' and r.get('road') != 'highway':
-        path = r['wp'].get(r['command'])
-        r['wp'] = {'overtake': path}
-        r['command'] = 'overtake'
+def lane_command(r):
+    """Rows collected while labels had an 'overtake' command: the pass becomes the lane-following
+    command with the offset path, as in every other row (the next turn wasn't recorded; passes
+    happen mid-block, so 'straight'). Their cmd_dist (0) wasn't the distance to the signal, so the
+    stop-line target is left unlabeled."""
+    if r['command'] == 'overtake':
+        r['wp'] = {'straight': r['wp'].get('overtake')}
+        r['command'] = 'straight'
+        r['cmd_dist'] = None
     return r
 LIGHTS = ['none', 'red', 'yellow', 'green']  # must match src/labels.js
 # Beyond this distance a lamp is a pixel or two even in the traffic-light camera, so the light
@@ -126,7 +128,7 @@ def load_runs(root):
                 name = f"{r['frame']:06d}"
                 files = [os.path.join(root, run, d, name + ext) for d, ext in (('frames', '.jpg'), ('tele', '.jpg'), ('labels', '.png'))]
                 if usable(r) and 'light' in r and all(os.path.isfile(p) for p in files):
-                    rows.append(overtake_command(r))
+                    rows.append(lane_command(r))
         if rows:
             runs[run] = link_past(link_past(rows), PAST2_DT, key='past2')
     return runs
