@@ -62,7 +62,7 @@ export class DebugOverlay {
     const nidx = [];
     for (let k = 0; k < NN_PTS - 1; k++) nidx.push(2 * k, 2 * k + 1, 2 * k + 2, 2 * k + 1, 2 * k + 3, 2 * k + 2);
     this.nnRibbon.geometry.setIndex(nidx);
-    this.nnAlt = [0, 1, 2].map(() => {
+    this.nnAlt = [0, 1, 2, 3].map(() => {
       const line = flat(new THREE.Line(new THREE.BufferGeometry(), overlay(new THREE.LineBasicMaterial({ color: 0xff4fd8, opacity: 0.45 }))));
       line.geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(NN_PTS * 3), 3));
       return line;

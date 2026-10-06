@@ -99,6 +99,19 @@ export function leadCap(v, gap, leadV, v0) {
   return a < LEAD.brake ? a : null;
 }
 
+// Time to collision, the third cap: networks with a ttc output predict 1/TTC to the obstacle on
+// their path, which two frames show as looming (scale-free, unlike the gap, which they still get
+// wrong by ~10 m), and the lead's speed (accurate to ~0.5 m/s). From those: the closing speed, and
+// the deceleration that stops the closing before contact (closing * 1/TTC / 2), with a margin.
+export const TTC = { danger: 0.4, margin: 1.5, minClosing: 1, minRecall: 0.6, minPrecision: 0.6 };
+
+export function ttcCap(v, ttcInv, leadV) {
+  if (!(ttcInv > TTC.danger)) return null;
+  const closing = v - Math.max(0, leadV);
+  if (closing < TTC.minClosing) return null;
+  return -Math.min(8, (TTC.margin * closing * ttcInv) / 2);
+}
+
 // ImageData (RGBA, rows top to bottom) -> float32 CHW in [0, 1].
 function toTensorData(img) {
   const n = img.width * img.height, src = img.data, out = new Float32Array(3 * n);
@@ -121,6 +134,7 @@ export class NeuralDriver {
     this.pastDt = null;
     this.lightAware = true; // apply the light-aware speed cap when the network has light outputs
     this.leadAware = true; // and the lead-aware braking cap when it has a lead output
+    this.ttcAware = true; // and the time-to-collision cap when it has a ttc output
     this.reset();
   }
 
@@ -145,6 +159,10 @@ export class NeuralDriver {
     // Only brake on the lead output if it was accurate on held-out data (it has been off by 15-20 m).
     const gapErr = this.meta.val?.gap_err;
     this.leadAware = gapErr !== undefined && gapErr < LEAD.maxValErr;
+    // Likewise the TTC cap: only if the network caught most dangerous closings on held-out data
+    // without crying wolf.
+    const v = this.meta.val ?? {};
+    this.ttcAware = (v.ttc_recall ?? 0) >= TTC.minRecall && (v.ttc_precision ?? 0) >= TTC.minPrecision;
     return this.meta;
   }
 
@@ -174,7 +192,9 @@ export class NeuralDriver {
   async observe(world, rgb, tele = null) {
     const { car, expert } = world;
     const pose = { x: car.x, z: car.z, h: car.h }, t = world.t, v = car.v;
-    const cmd = commandOf(expert.route, expert.s).kind;
+    // Networks trained before the overtake command follow the lane branch while passing.
+    const want = commandOf(expert.route, expert.s, expert.ot).kind;
+    const cmd = this.commands.includes(want) ? want : 'straight';
     this.pending = true;
     this.nextObs = t + this.period;
     const t0 = performance.now();
@@ -209,6 +229,7 @@ export class NeuralDriver {
         t, v, seg: out.seg.data, segDims: out.seg.dims, attention: out.attention.data, attnDims: out.attention.dims, image: rgb, tele, light,
         stopDist: out.stop_dist ? out.stop_dist.data[0] : null,
         lead: out.lead ? { gap: out.lead.data[0], v: out.lead.data[1] } : null,
+        ttcInv: out.ttc_inv ? out.ttc_inv.data[0] : null,
       });
       for (const k of Object.keys(out)) out[k].dispose?.();
       const ms = performance.now() - t0;
@@ -252,8 +273,10 @@ export class NeuralDriver {
       const age = Math.max(0, (world.t ?? p.t ?? 0) - (p.t ?? 0));
       lead = leadCap(car.v, p.lead.gap - traveled + p.lead.v * age, p.lead.v, p.vTarget[p.cmdIndex]);
     }
-    const caps = [light, lead].filter((c) => c !== null), cap = caps.length ? Math.min(...caps) : null;
+    let ttc = null;
+    if (this.ttcAware && p.ttcInv !== null && p.ttcInv !== undefined && p.lead) ttc = ttcCap(car.v, p.ttcInv, p.lead.v);
+    const caps = [light, lead, ttc].filter((c) => c !== null), cap = caps.length ? Math.min(...caps) : null;
     const out = followPath(pts, car.v, p.vTarget[p.cmdIndex], cap);
-    return { steer: out.steer, throttle: out.throttle, acc: out.acc, cmd: p.cmd, vTarget: p.vTarget[p.cmdIndex], lightStop: light !== null, leadBrake: lead !== null };
+    return { steer: out.steer, throttle: out.throttle, acc: out.acc, cmd: p.cmd, vTarget: p.vTarget[p.cmdIndex], lightStop: light !== null, leadBrake: lead !== null || ttc !== null };
   }
 }

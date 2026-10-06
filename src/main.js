@@ -210,7 +210,7 @@ async function autostart() {
     if (!(await setNeural(true))) return;
   }
   if (params.has('bench')) runBenchmark({ trials: Number(params.get('trials') ?? 2) });
-  else if (params.has('collect')) toggleCollect({ frames: Number(params.get('collect')) || Infinity, noise: Number(params.get('noise') ?? 0.5), highway: Number(params.get('hwshare') ?? 0.3), dense: params.get('dense') === '1' });
+  else if (params.has('collect')) toggleCollect({ frames: Number(params.get('collect')) || Infinity, noise: Number(params.get('noise') ?? 0.5), highway: Number(params.get('hwshare') ?? 0.3), dense: params.get('dense') === '1', fog: params.has('fog') ? Number(params.get('fog')) : null });
 }
 
 // ---------- cameras ----------
