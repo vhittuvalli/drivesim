@@ -194,9 +194,7 @@ export class NeuralDriver {
   async observe(world, rgb, tele = null) {
     const { car, expert } = world;
     const pose = { x: car.x, z: car.z, h: car.h }, t = world.t, v = car.v;
-    // Networks trained before the overtake command follow the lane branch while passing.
-    const want = commandOf(expert.route, expert.s, expert.ot).kind;
-    const cmd = this.commands.includes(want) ? want : 'straight';
+    const cmd = commandOf(expert.route, expert.s).kind;
     this.pending = true;
     this.nextObs = t + this.period;
     const t0 = performance.now();
