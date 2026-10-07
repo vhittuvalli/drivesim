@@ -4,6 +4,7 @@
 //   node scripts/headless.mjs collect --seeds 11,12,13 --frames 5000                 expert data
 //   node scripts/headless.mjs collect --seeds 21,22 --frames 4000 --neural --noise 0  DAgger
 //   node scripts/headless.mjs collect --seeds 31,32 --frames 4000 --highway 0.8       mostly highway
+//   node scripts/headless.mjs collect ... --neural --scenarios 0.7 --only lead-brake,hw-jam   targeted DAgger
 //   node scripts/headless.mjs bench --seed 1 --out models/bench.json
 //   node scripts/headless.mjs bench --seeds 1,2,3 --out models/bench.json            three cities, combined
 //
@@ -30,6 +31,8 @@ const { positionals, values: opt } = parseArgs({
     highway: { type: 'string', default: '0.3' }, // share of collection episodes on the highway
     dense: { type: 'boolean', default: false }, // heavy traffic in every episode
     fog: { type: 'string' }, // share of episodes in fog
+    scenarios: { type: 'string', default: '0.35' }, // share of episodes that play a scripted scenario
+    only: { type: 'string' }, // scenario ids to pick from, comma-separated (default: all)
     neural: { type: 'boolean', default: false },
     parallel: { type: 'string', default: '3' },
     seed: { type: 'string', default: '1' },
@@ -93,7 +96,7 @@ async function collect() {
   const one = async (seed) => {
     let left = Number(opt.frames), restarts = 0;
     while (left > 0) {
-      const q = `seed=${seed}&collect=${left}&noise=${opt.noise}&hwshare=${opt.highway}&speed=8&fx=0${opt.neural ? '&neural=1' : ''}${opt.dense ? '&dense=1' : ''}${opt.fog ? `&fog=${opt.fog}` : ''}`;
+      const q = `seed=${seed}&collect=${left}&noise=${opt.noise}&hwshare=${opt.highway}&speed=8&fx=0${opt.neural ? '&neural=1' : ''}${opt.dense ? '&dense=1' : ''}${opt.fog ? `&fog=${opt.fog}` : ''}&scen=${opt.scenarios}${opt.only ? `&only=${opt.only}` : ''}`;
       const b = await open(q);
       let st;
       try {

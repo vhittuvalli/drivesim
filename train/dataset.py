@@ -3,6 +3,7 @@
 Each sample: roof-camera image, current speed, and targets:
   tele     traffic-light camera image (runs from label version 3 on; older runs are skipped)
   past     the main camera PAST_DT seconds earlier (the same frame when there is none)
+  past2    the main camera PAST2_DT seconds earlier (likewise)
   light    ()         signal ahead: index into LIGHTS
   wp       (3, 8, 2)  waypoints (x forward, y left, meters) for each command branch
   wp_mask  (3,)       which branches have a label (all of them away from intersections)
@@ -21,16 +22,18 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-COMMANDS = ['left', 'straight', 'right', 'overtake']  # must match src/labels.js
+COMMANDS = ['left', 'straight', 'right']  # must match src/labels.js
 
 
-def overtake_command(r):
-    """Rows from before the overtake command: an expert overtake (labeled with the next turn's
-    command and the offset path) becomes the 'overtake' command with that path."""
-    if r.get('overtaking') and r['command'] != 'overtake' and r.get('road') != 'highway':
-        path = r['wp'].get(r['command'])
-        r['wp'] = {'overtake': path}
-        r['command'] = 'overtake'
+def lane_command(r):
+    """Rows collected while labels had an 'overtake' command: the pass becomes the lane-following
+    command with the offset path, as in every other row (the next turn wasn't recorded; passes
+    happen mid-block, so 'straight'). Their cmd_dist (0) wasn't the distance to the signal, so the
+    stop-line target is left unlabeled."""
+    if r['command'] == 'overtake':
+        r['wp'] = {'straight': r['wp'].get('overtake')}
+        r['command'] = 'straight'
+        r['cmd_dist'] = None
     return r
 LIGHTS = ['none', 'red', 'yellow', 'green']  # must match src/labels.js
 # Beyond this distance a lamp is a pixel or two even in the traffic-light camera, so the light
@@ -81,10 +84,11 @@ def light_target(r):
     return LIGHTS.index(r['light'])
 N_WP = 8
 AUX_STRIDE = 4  # label images are 256x128 -> 64x32 auxiliary maps
-PAST_DT = 0.3  # s: the earlier main-camera frame the network also sees (must match src/neural.js)
+PAST_DT = 0.3  # s: the earlier main-camera frame the network also sees (exported to policy.json)
+PAST2_DT = 1.0  # s: and an older one, long enough for a closing car to visibly grow
 
 
-def link_past(rows, dt=PAST_DT, tol=0.06):
+def link_past(rows, dt=PAST_DT, tol=0.06, key='past'):
     """Give each row the frame number of the row about dt seconds earlier in the same run (itself
     when there is none, e.g. at the start of an episode or across an upload gap)."""
     rows = sorted(rows, key=lambda r: r['t'])
@@ -93,7 +97,7 @@ def link_past(rows, dt=PAST_DT, tol=0.06):
         want = r['t'] - dt
         while j + 1 < len(rows) and rows[j + 1]['t'] <= want + tol:
             j += 1
-        r['past'] = rows[j]['frame'] if abs(rows[j]['t'] - want) <= tol else r['frame']
+        r[key] = rows[j]['frame'] if abs(rows[j]['t'] - want) <= tol else r['frame']
     return rows
 # Label version 2 (src/labels.js) spreads waypoints out with speed above this; version-1 rows
 # faster than it have fixed spacing, which means something else, so they are left out.
@@ -124,9 +128,9 @@ def load_runs(root):
                 name = f"{r['frame']:06d}"
                 files = [os.path.join(root, run, d, name + ext) for d, ext in (('frames', '.jpg'), ('tele', '.jpg'), ('labels', '.png'))]
                 if usable(r) and 'light' in r and all(os.path.isfile(p) for p in files):
-                    rows.append(overtake_command(r))
+                    rows.append(lane_command(r))
         if rows:
-            runs[run] = link_past(rows)
+            runs[run] = link_past(link_past(rows), PAST2_DT, key='past2')
     return runs
 
 
@@ -200,6 +204,8 @@ class DriveDataset(Dataset):
         tele = np.array(Image.open(os.path.join(self.root, run, 'tele', name + '.jpg')).convert('RGB'), dtype=np.uint8)
         past_name = f"{r.get('past', r['frame']):06d}"
         past = np.array(Image.open(os.path.join(self.root, run, 'frames', past_name + '.jpg')).convert('RGB'), dtype=np.uint8)
+        past2_name = f"{r.get('past2', r['frame']):06d}"
+        past2 = np.array(Image.open(os.path.join(self.root, run, 'frames', past2_name + '.jpg')).convert('RGB'), dtype=np.uint8)
         lab = np.array(Image.open(os.path.join(self.root, run, 'labels', name + '.png')).convert('RGB'), dtype=np.uint8)
         s = AUX_STRIDE
         seg = lab[s // 2::s, s // 2::s, 0].astype(np.int64)
@@ -219,6 +225,7 @@ class DriveDataset(Dataset):
             'image': torch.from_numpy(img).permute(2, 0, 1),  # uint8 CHW
             'tele': torch.from_numpy(tele).permute(2, 0, 1),
             'past': torch.from_numpy(past).permute(2, 0, 1),
+            'past2': torch.from_numpy(past2).permute(2, 0, 1),
             'light': torch.tensor(light_target(r)),
             'stop': torch.tensor(stop_target(r)[0], dtype=torch.float32),
             'stop_mask': torch.tensor(stop_target(r)[1], dtype=torch.float32),

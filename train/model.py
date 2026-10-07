@@ -27,7 +27,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-N_CMD, N_WP, N_CLASSES, N_LIGHTS = 4, 8, 11, 4  # commands: left, straight, right, overtake
+N_CMD, N_WP, N_CLASSES, N_LIGHTS = 3, 8, 11, 4  # commands: left, straight, right
 # Segmentation class weights (classes as in src/labels.js): vehicles and pedestrians are a few
 # percent of the pixels but are what braking depends on; traffic lights are tiny too.
 SEG_WEIGHTS = torch.ones(N_CLASSES)
@@ -52,8 +52,9 @@ class Policy(nn.Module):
         self.c4 = block(48, 64, 3, 1)  # 16x32
         self.c5 = block(64, 96, 3, 2)  # 8x16
         self.c6 = block(96, 64, 3, 2)  # 4x8
-        # Current trunk features and their change since the past frame.
-        self.fc = nn.Sequential(nn.Flatten(), nn.Linear(64 * 4 * 8 * 2, 256), nn.ReLU(inplace=True), nn.Dropout(0.3))
+        # Current trunk features and their change since the past frame (0.3 s) and the older past
+        # frame (1 s): over 0.3 s a car closing in barely grows; over 1 s the growth shows.
+        self.fc = nn.Sequential(nn.Flatten(), nn.Linear(64 * 4 * 8 * 3, 256), nn.ReLU(inplace=True), nn.Dropout(0.3))
         # Traffic-light camera: a lighter trunk; lamps are small, so keep the first stride-2 layer
         # narrow but don't pool them away before they have a few channels.
         self.tele = nn.Sequential(
@@ -91,16 +92,17 @@ class Policy(nn.Module):
         f5 = self.c5(f4)
         return f2, f3, f4, f5, self.c6(f5)
 
-    def forward(self, image, tele, speed, past=None, speed_v=None):
-        """image, tele, past: (B, 3, 128, 256) float in [0, 1] (past: the main camera 0.3 s earlier;
-        the current frame if omitted); speed: (B, 1) m/s; speed_v: the speed the target-speed heads see
+    def forward(self, image, tele, speed, past=None, past2=None, speed_v=None):
+        """image, tele, past, past2: (B, 3, 128, 256) float in [0, 1] (past, past2: the main camera
+        0.3 s and 1 s earlier; the current frame if omitted); speed: (B, 1) m/s; speed_v: the speed the target-speed heads see
         (training hides it in some samples; the same as speed if omitted).
         Returns waypoints (B, 3, 8, 2) meters, target speed (B, 3) m/s, seg logits (B, 11, 32, 64),
         depth (B, 1, 32, 64) in [0, 1], light logits (B, 4), stop-line distance (B,) meters,
         lead (B, 2) gap meters and speed m/s, ego speed (B,) m/s from vision, 1/TTC (B,) 1/s, attention (B, 1, 32, 64) in [0, 1]."""
         f2, f3, f4, f5, f6 = self.trunk(image)
         p6 = self.trunk(past)[-1] if past is not None else f6
-        vis = torch.cat([self.fc(torch.cat([f6, f6 - p6], 1)), self.tele((tele - self.mean) / self.std)], 1)
+        q6 = self.trunk(past2)[-1] if past2 is not None else f6
+        vis = torch.cat([self.fc(torch.cat([f6, f6 - p6, f6 - q6], 1)), self.tele((tele - self.mean) / self.std)], 1)
         light = self.light(vis)
         stop_dist = F.softplus(self.stop(vis)[:, 0]) * 10.0
         z = torch.cat([vis, self.speed_fc(speed / SPEED_SCALE)], 1)

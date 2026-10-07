@@ -60,7 +60,7 @@ def evaluate(model, loader, device):
     counts = {'light': [0, 0], 'signal': [0, 0], 'stop': [0, 0], 'gap': [0, 0], 'veh': [0, 0], 'ttc_r': [0, 0], 'ttc_p': [0, 0]}
     for batch in loader:
         batch = {k: v.to(device) for k, v in batch.items()}
-        pred = model(batch['image'].float() / 255, batch['tele'].float() / 255, batch['speed'], batch['past'].float() / 255)
+        pred = model(batch['image'].float() / 255, batch['tele'].float() / 255, batch['speed'], batch['past'].float() / 255, batch['past2'].float() / 255)
         _, parts = losses(pred, batch)
         wp = pred[0]
         taken = wp[torch.arange(len(wp)), batch['cmd']]
@@ -136,22 +136,25 @@ def main():
     model = Policy().to(device)
     if a.init:
         own = model.state_dict()
-        init = {k: v for k, v in torch.load(a.init, map_location='cpu')['model'].items() if k in own and own[k].shape == v.shape}
+        ck = torch.load(a.init, map_location='cpu')['model']
+        init = {k: v for k, v in ck.items() if k in own and own[k].shape == v.shape}
+        # A checkpoint from before the older past frame: its first fc layer takes [current, change
+        # since 0.3 s]. Keep those weights and start the new change-since-1 s inputs at zero, so the
+        # network begins exactly where the checkpoint was and learns to use them.
+        fw = ck.get('fc.1.weight')
+        if fw is not None and fw.shape != own['fc.1.weight'].shape and fw.shape[0] == own['fc.1.weight'].shape[0]:
+            w = torch.zeros_like(own['fc.1.weight'])
+            w[:, : fw.shape[1]] = fw
+            init['fc.1.weight'] = w
+            print('older past frame: new fc inputs start at zero')
         missing, _ = model.load_state_dict(init, strict=False)
         if missing:
             print(f'new layers (not in {a.init}): {sorted({k.split(".")[0] for k in missing})}')
-        # Fill in only the heads the checkpoint doesn't have. Target-speed heads (split off the
-        # combined heads) start from the combined heads' speed output; the overtake branch (added
-        # later) starts from the trained straight branch.
+        # Fill in only the heads the checkpoint doesn't have: target-speed heads (split off the
+        # combined heads) start from the combined heads' speed output.
         gone = lambda prefix: any(k.startswith(prefix) for k in missing)
         with torch.no_grad():
             for i, (h, sh) in enumerate(zip(model.heads, model.speed_heads)):
-                if i == 3 and gone('heads.3.'):
-                    h.load_state_dict(model.heads[1].state_dict())
-                    if not gone('speed_heads.1.'):
-                        sh.load_state_dict(model.speed_heads[1].state_dict())
-                        print('overtake branch initialized from the straight branch')
-                        continue
                 if gone(f'speed_heads.{i}.'):
                     sh[0].load_state_dict(h[0].state_dict())
                     sh[2].weight.copy_(h[2].weight[-1:])
@@ -181,12 +184,12 @@ def main():
         total = 0.0
         for batch in train_dl:
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
-            image, past = augment(batch['image'], batch['past'])
+            image, past, past2 = augment(batch['image'], batch['past'], batch['past2'])
             # Hide the speed reading in a share of samples, so the speed head can't just copy it and
             # has to read motion from the two frames (the targets keep the true speed).
             batch['true_speed'] = batch['speed']
             hide = (torch.rand(len(image), 1, device=image.device) < a.speed_dropout).float()
-            pred = model(image, augment(batch['tele']), batch['speed'], past, speed_v=batch['speed'] * (1 - hide))
+            pred = model(image, augment(batch['tele']), batch['speed'], past, past2, speed_v=batch['speed'] * (1 - hide))
             loss, _ = losses(pred, batch)
             opt.zero_grad(set_to_none=True)
             loss.backward()

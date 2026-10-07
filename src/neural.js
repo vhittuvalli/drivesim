@@ -103,7 +103,9 @@ export function leadCap(v, gap, leadV, v0) {
 // their path, which two frames show as looming (scale-free, unlike the gap, which they still get
 // wrong by ~10 m), and the lead's speed (accurate to ~0.5 m/s). From those: the closing speed, and
 // the deceleration that stops the closing before contact (closing * 1/TTC / 2), with a margin.
-export const TTC = { danger: 0.4, margin: 1.5, minClosing: 1, minRecall: 0.6, minPrecision: 0.6 };
+// The gate is strict: at 75% recall and 73% precision the cap added 14 takeovers (8 of them late
+// braking) to the same network without it, braking for false alarms and too gently for real ones.
+export const TTC = { danger: 0.4, margin: 1.5, minClosing: 1, minRecall: 0.9, minPrecision: 0.9 };
 
 export function ttcCap(v, ttcInv, leadV) {
   if (!(ttcInv > TTC.danger)) return null;
@@ -132,6 +134,7 @@ export class NeuralDriver {
     this.inferMs = 0;
     this.usesTele = false;
     this.pastDt = null;
+    this.past2Dt = null;
     this.lightAware = true; // apply the light-aware speed cap when the network has light outputs
     this.leadAware = true; // and the lead-aware braking cap when it has a lead output
     this.ttcAware = true; // and the time-to-collision cap when it has a ttc output
@@ -156,6 +159,7 @@ export class NeuralDriver {
     [, , this.inH, this.inW] = this.meta.inputs.image;
     this.usesTele = !!this.meta.inputs.tele;
     this.pastDt = this.meta.inputs.past ? this.meta.past_dt ?? 0.3 : null; // seconds; null: single-frame network
+    this.past2Dt = this.meta.inputs.past2 ? this.meta.past2_dt : null; // the older frame, for networks that have it
     // Only brake on the lead output if it was accurate on held-out data (it has been off by 15-20 m).
     const gapErr = this.meta.val?.gap_err;
     this.leadAware = gapErr !== undefined && gapErr < LEAD.maxValErr;
@@ -192,9 +196,7 @@ export class NeuralDriver {
   async observe(world, rgb, tele = null) {
     const { car, expert } = world;
     const pose = { x: car.x, z: car.z, h: car.h }, t = world.t, v = car.v;
-    // Networks trained before the overtake command follow the lane branch while passing.
-    const want = commandOf(expert.route, expert.s, expert.ot).kind;
-    const cmd = this.commands.includes(want) ? want : 'straight';
+    const cmd = commandOf(expert.route, expert.s).kind;
     this.pending = true;
     this.nextObs = t + this.period;
     const t0 = performance.now();
@@ -206,15 +208,20 @@ export class NeuralDriver {
       };
       if (this.usesTele) feeds.tele = new Tensor('float32', toTensorData(tele), [1, 3, ...this.meta.inputs.tele.slice(2)]);
       if (this.pastDt !== null) {
-        // The frame closest to pastDt ago (observations are 0.1 s apart); the current one at first.
-        let past = rgb, best = 0.06;
-        for (const h of this.history) {
-          const err = Math.abs(t - this.pastDt - h.t);
-          if (err <= best) (best = err), (past = h.image);
-        }
-        feeds.past = new Tensor('float32', toTensorData(past), [1, 3, this.inH, this.inW]);
+        // The frame closest to dt ago (observations are 0.1 s apart); the current one at first.
+        const ago = (dt) => {
+          let past = rgb, best = 0.06;
+          for (const h of this.history) {
+            const err = Math.abs(t - dt - h.t);
+            if (err <= best) (best = err), (past = h.image);
+          }
+          return new Tensor('float32', toTensorData(past), [1, 3, this.inH, this.inW]);
+        };
+        feeds.past = ago(this.pastDt);
+        if (this.past2Dt !== null) feeds.past2 = ago(this.past2Dt);
         this.history.push({ t, image: rgb });
-        while (this.history.length && this.history[0].t < t - 1) this.history.shift();
+        const keep = Math.max(this.pastDt, this.past2Dt ?? 0) + 0.2;
+        while (this.history.length && this.history[0].t < t - keep) this.history.shift();
       }
       const out = await this.session.run(feeds);
       // Probabilities for the light ahead (networks trained with the traffic-light camera).

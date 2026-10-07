@@ -228,24 +228,25 @@ test('safety driver: a late braker closing on a highway jam is taken over in tim
   assert.ok(risk >= 1, `collision-risk takeovers: ${risk}`);
 });
 
-test('overtake command: labeled while the expert passes, and drivable from perfect predictions', async () => {
+test('overtaking: labeled on the lane command with the offset path, and drivable from perfect predictions', async () => {
   const { NeuralDriver } = await import('../src/neural.js');
   for (const seed of [1, 2]) {
     const w = world(seed, { cars: 0, peds: 0 });
     const run = w.startScenario('overtake-parked');
-    let overtakeFrames = 0;
+    let passing = 0;
     while (run.status === 'running') {
       w.step(1 / 60);
       const L = makeLabels(w, w.expertCtrl);
-      if (L.command === 'overtake') {
-        overtakeFrames++;
-        assert.ok(L.wp.overtake && !L.wp.straight && L.overtaking);
-      } else assert.equal(L.wp.overtake, null);
+      assert.ok(COMMANDS.includes(L.command));
+      if (L.overtaking) {
+        passing++;
+        assert.ok(L.wp[L.command] && COMMANDS.every((k) => k === L.command || !L.wp[k]));
+      }
     }
     assert.equal(run.status, 'passed');
-    assert.ok(overtakeFrames > 60, `overtake frames ${overtakeFrames}`);
+    assert.ok(passing > 60, `overtaking frames ${passing}`);
   }
-  // The oracle network: the command picks the overtake branch and the car passes with no takeover.
+  // The oracle network: the lane branch carries the pass and the car gets by with no takeover.
   const w = world(3, { cars: 0, peds: 0 }), nn = new NeuralDriver({ hz: 10 });
   nn.commands = COMMANDS;
   const run = w.startScenario('overtake-parked');

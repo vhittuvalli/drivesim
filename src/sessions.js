@@ -39,9 +39,10 @@ export function randomConditions(rand, highway = 0.3, dense = false, fog = null)
 export class CollectSession {
   // frames: stop after this many (Infinity: until stopped). noise: share of episodes with
   // steering noise. scenarios: share of episodes that play a scripted scenario. highway: share of
-  // episodes on the highway.
-  constructor(app, collector, { seed, frames = Infinity, hz = 10, episodeSeconds = 75, noise = 0.5, scenarios = 0.35, highway = 0.3, dense = false, fog = null, rand = Math.random, driver = 'expert' } = {}) {
-    Object.assign(this, { app, collector, seed, frames, hz, episodeSeconds, noise, scenarios, highway, dense, fog, rand, driver });
+  // episodes on the highway. only: scenario ids to pick from (null: all of them), e.g. just the
+  // braking scenarios for a targeted DAgger round.
+  constructor(app, collector, { seed, frames = Infinity, hz = 10, episodeSeconds = 75, noise = 0.5, scenarios = 0.35, only = null, highway = 0.3, dense = false, fog = null, rand = Math.random, driver = 'expert' } = {}) {
+    Object.assign(this, { app, collector, seed, frames, hz, episodeSeconds, noise, scenarios, only, highway, dense, fog, rand, driver });
     this.total = 0;
     this.episode = 0;
     this.done = false;
@@ -62,8 +63,8 @@ export class CollectSession {
     this.cond = randomConditions(rand, this.highway, this.dense, this.fog);
     this.nextLane = 0; // when to pick a new preferred highway lane
     this.app.setConditions(this.cond);
-    const onRoad = Object.keys(SCENARIOS).filter((id) => (SCENARIOS[id].road ?? 'city') === this.cond.road);
-    this.scenario = rand() < this.scenarios ? pick(rand, onRoad) : '';
+    const onRoad = Object.keys(SCENARIOS).filter((id) => (SCENARIOS[id].road ?? 'city') === this.cond.road && (!this.only || this.only.includes(id)));
+    this.scenario = onRoad.length && rand() < this.scenarios ? pick(rand, onRoad) : '';
     this.app.startScenario(this.scenario);
     const noisy = rand() < this.noise;
     world.steerNoise = noisy ? makeSteerNoise(rand) : null;

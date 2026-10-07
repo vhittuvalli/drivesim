@@ -104,8 +104,9 @@ sits still for 2.5 s when the expert would pull away, the expert drives for 3 s 
 takeover. Training oversamples turns, lane changes, pulling away from a stop, hard braking and
 frames with an obstacle close ahead.
 
-**Two moments of the camera.** The network also sees the main camera 0.3 s earlier, through the same
-image encoder, so it can tell that a car ahead is getting closer. Its target speed comes from separate
+**Three moments of the camera.** The network also sees the main camera 0.3 s and 1 s earlier, through
+the same image encoder, so it can tell that a car ahead is getting closer (over 0.3 s a car closing at
+5 m/s from 20 m grows by under 8%; over 1 s by about a third). Its target speed comes from separate
 heads whose speed input is hidden in half the training samples (and it learns to estimate its own speed
 from the images), so it can't just copy the speed it's already going; the path heads always see the
 true speed, since waypoint spacing depends on it.
@@ -150,6 +151,8 @@ without takeovers, meters of autonomous driving per takeover, contacts.
     npm run collect -- --seeds 201,202,203 --frames 4000 --neural --noise 0   # DAgger data
     npm run collect -- --seeds 301,302,303 --frames 5000 --highway 0.8        # mostly highway
     npm run collect -- --seeds 401,402,403 --frames 6000 --dense               # heavy traffic
+    npm run collect -- --seeds 501,502 --frames 6000 --neural --noise 0 --scenarios 0.7 \
+      --only lead-brake,hw-jam,hw-cut-in --fog 0.25                       # targeted DAgger
     npm run train -- --init models/policy.pt --epochs 6                  # fine-tune on all of data/
     npm run bench -- --seeds 1,2,3 --out models/bench.json               # three cities, combined
 
