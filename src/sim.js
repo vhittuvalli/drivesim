@@ -71,6 +71,7 @@ export class World {
     this.expertCtrl = null; // what the expert did or would have done this step (labels)
     this.scenario = null;
     this.contacts = 0;
+    this.contactLog = []; // details of each contact (see detectContacts)
     this.lastContact = null;
     this.touching = new Set();
     this.ctrl = null;
@@ -124,10 +125,20 @@ export class World {
   // Count new contacts between the ego footprint and any vehicle or pedestrian.
   detectContacts() {
     const ego = this.car;
-    const mark = (key, hit, what) => {
+    const mark = (key, hit, what, other = null) => {
       if (hit && !this.touching.has(key)) {
         this.contacts++;
         this.lastContact = { what, t: this.t };
+        // Enough to tell what went wrong without a replay: who was driving, how fast, and where
+        // the other party was relative to us (x forward, y left).
+        const dx = other.x - ego.x, dz = other.z - ego.z, c = Math.cos(ego.h), s = Math.sin(ego.h);
+        const lastTakeover = this.safety?.events.at(-1);
+        this.contactLog.push({
+          t: this.t, what, x: ego.x, z: ego.z, v: ego.v, otherV: other.v ?? 0,
+          rel: [dx * c + dz * s, dx * s - dz * c].map((d) => Math.round(d * 10) / 10),
+          driver: this.ctrl?.driver ?? (this.policy ? 'neural' : 'expert'),
+          lastTakeover: lastTakeover ? { reason: lastTakeover.reason, ago: this.t - lastTakeover.t } : null,
+        });
       }
       if (hit) this.touching.add(key);
       else this.touching.delete(key);
@@ -137,11 +148,11 @@ export class World {
       if (Math.abs(a.x - ego.x) > 8 || Math.abs(a.z - ego.z) > 8) continue;
       const e = a.halfLen - 0.75;
       const hit = [-e, 0, e].some((k) => inBox(ego, a.x + Math.cos(a.h) * k, a.z + Math.sin(a.h) * k, HALF_LEN + 0.6, 0.92 + 0.85));
-      mark(`c${a.id ?? `${a.x},${a.z}`}`, hit, a.parked ? 'a parked car' : 'a vehicle');
+      mark(`c${a.id ?? `${a.x},${a.z}`}`, hit, a.parked ? 'a parked car' : 'a vehicle', a);
     }
     for (const p of this.crowd.peds) {
       if (Math.abs(p.x - ego.x) > 5 || Math.abs(p.z - ego.z) > 5) continue;
-      mark(`p${p.id}`, inBox(ego, p.x, p.z, HALF_LEN + 0.25, 0.92 + 0.25), 'a pedestrian');
+      mark(`p${p.id}`, inBox(ego, p.x, p.z, HALF_LEN + 0.25, 0.92 + 0.25), 'a pedestrian', p);
     }
   }
 
@@ -308,6 +319,7 @@ export class World {
     def.setup(this, run);
     for (const c of this.traffic.cars) if (!before.has(c)) c.scenario = true;
     this.contacts = 0;
+    this.contactLog = []; // details of each contact (see detectContacts)
     this.touching.clear();
     return run;
   }
