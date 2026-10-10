@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mulberry32 } from '../src/config.js';
 import { Car } from './helpers.js';
-import { Route, Expert, idm, IDM, HALF_LEN } from '../src/planner.js';
+import { Route, Expert, idm, IDM, HALF_LEN, pathObstacle } from '../src/planner.js';
 import { Signals } from '../src/signals.js';
 
 function drive(seed, seconds) {
@@ -68,3 +68,13 @@ for (const seed of [1, 7, 99]) {
     assert.ok(s.maxLat < 1.0, `max lateral error ${s.maxLat.toFixed(2)} m`);
   });
 }
+
+test('traffic sees the ego car when it sticks into the lane at an angle', () => {
+  // A traffic car's path along z = 0; the ego stopped beside it, rotated so its rear corner
+  // reaches ~0.66 m from the path's centerline (a real collision for a car 0.92 m half-wide).
+  const samples = Array.from({ length: 20 }, (_, i) => ({ x: i * 1.5, z: 0, h: 0, d: i * 1.5 }));
+  const pose = { kind: 'car', x: 15, z: 2.6, h: 0.5, v: 0, halfLen: HALF_LEN };
+  assert.equal(pathObstacle(samples, [pose], null).gap, Infinity, 'an ordinary car there is clear of the path');
+  const seen = pathObstacle(samples, [{ ...pose, ego: true }], null);
+  assert.ok(Number.isFinite(seen.gap) && seen.gap < 15, `ego gap ${seen.gap}`);
+});
