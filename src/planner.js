@@ -207,7 +207,13 @@ export function pathObstacle(samples, agents, self) {
     if (a === self || a.parked) continue;
     if (Math.abs(a.x - o.x) > reach || Math.abs(a.z - o.z) > reach) continue;
     let pts, r;
-    if (a.kind === 'car') {
+    if (a.ego) {
+      // Traffic gives the learned driver a wider berth, out to its bumpers and corners: it can stop
+      // half out of its lane or at an angle, where the three-point test let cars drive into it.
+      const e = a.halfLen - 0.5, cx = Math.cos(a.h) * e, cz = Math.sin(a.h) * e;
+      pts = [-1, -0.5, 0, 0.5, 1].map((k) => [a.x + cx * k, a.z + cz * k]);
+      r = 2.1;
+    } else if (a.kind === 'car') {
       const e = a.halfLen - 0.9, cx = Math.cos(a.h) * e, cz = Math.sin(a.h) * e;
       pts = [[a.x, a.z], [a.x + cx, a.z + cz], [a.x - cx, a.z - cz]];
       r = 1.85;

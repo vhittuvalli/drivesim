@@ -5,13 +5,24 @@
 // stallGrace), or is closing on an obstacle with under ttcMin seconds to impact while braking less
 // than the expert, the expert takes over for a few seconds (a disengagement). The headline
 // metric is autonomous distance per disengagement, as reported by real AV programs.
-import { angleWrap } from './planner.js';
+import { angleWrap, HALF_LEN } from './planner.js';
+import { WHEELBASE, MAX_STEER } from './config.js';
 
 export const TAKEOVER_SECONDS = 3;
 
+// Whether a car at `pose` (x, z, h; the ego's size) touches vehicle `a`: points along a's axis
+// inside the ego's footprint grown by a's half width. The benchmark counts contacts with this.
+export function touchesVehicle(pose, a) {
+  const e = a.halfLen - 0.75, c = Math.cos(pose.h), s = Math.sin(pose.h);
+  return [-e, 0, e].some((k) => {
+    const dx = a.x + Math.cos(a.h) * k - pose.x, dz = a.z + Math.sin(a.h) * k - pose.z;
+    return Math.abs(dx * c + dz * s) < HALF_LEN + 0.6 && Math.abs(-dx * s + dz * c) < 0.92 + 0.85;
+  });
+}
+
 export class SafetyDriver {
-  constructor({ maxLateral = 1.1, maxHeading = 0.45, brakeDemand = -3, brakeGrace = 0.3, stallGrace = 2.5, ttcMin = 2, ttcGrace = 0.2, maxLateralOvertake = 1.5 } = {}) {
-    Object.assign(this, { maxLateral, maxHeading, brakeDemand, brakeGrace, stallGrace, ttcMin, ttcGrace, maxLateralOvertake });
+  constructor({ maxLateral = 1.1, maxHeading = 0.45, brakeDemand = -3, brakeGrace = 0.3, stallGrace = 2.5, ttcMin = 2, ttcGrace = 0.2, maxLateralOvertake = 1.5, scrapeHorizon = 0.8 } = {}) {
+    Object.assign(this, { maxLateral, maxHeading, brakeDemand, brakeGrace, stallGrace, ttcMin, ttcGrace, maxLateralOvertake, scrapeHorizon });
     this.enabled = true;
     this.reset();
   }
@@ -69,12 +80,35 @@ export class SafetyDriver {
     const risk = !!L && L.gap < 80 && rate > 0.5 && L.gap / rate < ttcMin && nn.throttle > exp.throttle + 0.3;
     this.closing = risk ? this.closing + dt : 0;
     if (risk && this.closing > this.ttcGrace) return 'collision risk';
+    if (this.willScrape(world, nn)) return 'about to scrape a vehicle';
     const under = exp.acc < this.brakeDemand && car.v > 1 && nn.throttle > exp.throttle + 0.35;
     this.underBraking = under ? this.underBraking + dt : 0;
     if (under && this.underBraking > this.brakeGrace) {
       return { pedestrian: 'late braking for a pedestrian', signal: 'about to run a red light', crossing: 'late braking for a crossing vehicle' }[exp.reason] ?? 'late braking';
     }
     return null;
+  }
+
+  // Rolling the learned driver's steering forward scrapeHorizon seconds at the current speed (and
+  // other vehicles straight on at theirs), the car would touch a vehicle it isn't touching now. The lane, heading and lead checks all missed
+  // the network clipping a parked car beside its path while passing at 4 m/s.
+  willScrape(world, nn) {
+    const { car } = world;
+    if (car.v < 0.5 || !world.traffic) return false;
+    const near = [...world.traffic.agents, ...(world.parked ?? []).filter((p) => !p.hidden)]
+      .filter((a) => Math.abs(a.x - car.x) < 12 && Math.abs(a.z - car.z) < 12 && !touchesVehicle(car, a));
+    if (!near.length) return false;
+    const p = { x: car.x, z: car.z, h: car.h }, target = Math.max(-1, Math.min(1, nn.steer)) * MAX_STEER, dt = 0.1;
+    let steer = car.steer ?? target;
+    for (let t = dt; t < this.scrapeHorizon + 1e-9; t += dt) {
+      steer += Math.max(-1.6 * dt, Math.min(1.6 * dt, target - steer));
+      p.h += (car.v / WHEELBASE) * Math.tan(steer) * dt;
+      p.x += car.v * Math.cos(p.h) * dt;
+      p.z += car.v * Math.sin(p.h) * dt;
+      const moved = (a) => ({ ...a, x: a.x + Math.cos(a.h) * a.v * t, z: a.z + Math.sin(a.h) * a.v * t });
+      if (near.some((a) => touchesVehicle(p, a.v ? moved(a) : a))) return true;
+    }
+    return false;
   }
 
   // Returns the control to apply: the learned driver's, or the expert's during a takeover.
