@@ -273,6 +273,26 @@ test('time-to-collision cap: brakes in proportion to closing speed, not for movi
   assert.ok(cutIn < -1.2 && cutIn > -3, `cut-in: ${cutIn}`);
 });
 
+test('safety driver: takes over before steering into a vehicle beside the car, not for steering past it', () => {
+  const w = world(1, { cars: 0, peds: 0 });
+  w.parked.splice(0, w.parked.length, { kind: 'car', parked: true, x: 4, z: -2.2, h: 0, v: 0, halfLen: 2.3 });
+  Object.assign(w.car, { x: 0, z: 0, h: 0, v: 4, steer: 0 }); // heading +x; the parked car is ahead-left
+  const sd = w.safety;
+  assert.equal(sd.willScrape(w, { steer: -1, throttle: 0 }), true, 'hard left into it');
+  assert.equal(sd.willScrape(w, { steer: 0, throttle: 0 }), false, 'straight past it');
+  assert.equal(sd.willScrape(w, { steer: 0.5, throttle: 0 }), false, 'away from it');
+  w.car.v = 0;
+  assert.equal(sd.willScrape(w, { steer: -1, throttle: 0 }), false, 'stopped');
+  // A car just ahead moving at our speed isn't a scrape; the same car stopped is.
+  w.parked.length = 0;
+  const ahead = { kind: 'car', x: 5.2, z: 0, h: 0, v: 4, halfLen: 2.3 };
+  w.traffic = { agents: [ahead] };
+  w.car.v = 4;
+  assert.equal(sd.willScrape(w, { steer: 0, throttle: 0 }), false, 'following');
+  ahead.v = 0;
+  assert.equal(sd.willScrape(w, { steer: 0, throttle: 0 }), true, 'closing on a stopped car');
+});
+
 test('safety driver: drifting right during an overtake is taken over before touching parked cars', () => {
   for (const seed of [1, 2, 3]) {
     const w = world(seed, { cars: 0, peds: 0 });
