@@ -7,7 +7,7 @@ import { Signals } from './signals.js';
 import { Traffic } from './traffic.js';
 import { Crowd } from './peds.js';
 import { SCENARIOS } from './scenarios.js';
-import { SafetyDriver, touchesVehicle } from './safety.js';
+import { SafetyDriver, touchesVehicle, touchesPedestrian } from './safety.js';
 import { HW, HW_LENGTH, HighwayRoute, highwayPose, onHighway, loopDist, laneOffset, lanePoint } from './highway.js';
 
 export const WEATHER = {
@@ -154,7 +154,7 @@ export class World {
     }
     for (const p of this.crowd.peds) {
       if (Math.abs(p.x - ego.x) > 5 || Math.abs(p.z - ego.z) > 5) continue;
-      mark(`p${p.id}`, inBox(ego, p.x, p.z, HALF_LEN + 0.25, 0.92 + 0.25), 'a pedestrian', p);
+      mark(`p${p.id}`, touchesPedestrian(ego, p), 'a pedestrian', p);
     }
   }
 

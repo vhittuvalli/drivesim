@@ -31,6 +31,11 @@ function takeoverContext(world, exp, nn) {
 
 // Whether a car at `pose` (x, z, h; the ego's size) touches vehicle `a`: points along a's axis
 // inside the ego's footprint grown by a's half width. The benchmark counts contacts with this.
+export function touchesPedestrian(pose, p) {
+  const dx = p.x - pose.x, dz = p.z - pose.z, c = Math.cos(pose.h), s = Math.sin(pose.h);
+  return Math.abs(dx * c + dz * s) < HALF_LEN + 0.25 && Math.abs(-dx * s + dz * c) < 0.92 + 0.25;
+}
+
 export function touchesVehicle(pose, a) {
   const e = a.halfLen - 0.75, c = Math.cos(pose.h), s = Math.sin(pose.h);
   return [-e, 0, e].some((k) => {
@@ -99,7 +104,8 @@ export class SafetyDriver {
     const risk = !!L && L.gap < 80 && rate > 0.5 && L.gap / rate < ttcMin && nn.throttle > exp.throttle + 0.3;
     this.closing = risk ? this.closing + dt : 0;
     if (risk && this.closing > this.ttcGrace) return 'collision risk';
-    if (this.willScrape(world, nn)) return 'about to scrape a vehicle';
+    const scrape = this.willScrape(world, nn);
+    if (scrape) return scrape === 'pedestrian' ? 'about to hit a pedestrian' : 'about to scrape a vehicle';
     const under = exp.acc < this.brakeDemand && car.v > 1 && nn.throttle > exp.throttle + 0.35;
     this.underBraking = under ? this.underBraking + dt : 0;
     if (under && this.underBraking > this.brakeGrace) {
@@ -109,14 +115,16 @@ export class SafetyDriver {
   }
 
   // Rolling the learned driver's steering forward scrapeHorizon seconds at the current speed (and
-  // other vehicles straight on at theirs), the car would touch a vehicle it isn't touching now. The lane, heading and lead checks all missed
-  // the network clipping a parked car beside its path while passing at 4 m/s.
+  // other road users straight on at theirs), the car would touch a vehicle or pedestrian it isn't
+  // touching now. The lane, heading and lead checks missed the network clipping a parked car beside
+  // its path at 4 m/s, and creeping at 0.6 m/s into a pedestrian standing 2.6 m ahead in fog.
   willScrape(world, nn) {
     const { car } = world;
-    if (car.v < 0.5 || !world.traffic) return false;
-    const near = [...world.traffic.agents, ...(world.parked ?? []).filter((p) => !p.hidden)]
-      .filter((a) => Math.abs(a.x - car.x) < 12 && Math.abs(a.z - car.z) < 12 && !touchesVehicle(car, a));
-    if (!near.length) return false;
+    if (car.v < 0.5 || !world.traffic) return null;
+    const close = (a) => Math.abs(a.x - car.x) < 12 && Math.abs(a.z - car.z) < 12;
+    const near = [...world.traffic.agents, ...(world.parked ?? []).filter((p) => !p.hidden)].filter((a) => close(a) && !touchesVehicle(car, a));
+    const peds = (world.crowd?.peds ?? []).filter((p) => close(p) && !touchesPedestrian(car, p));
+    if (!near.length && !peds.length) return null;
     const p = { x: car.x, z: car.z, h: car.h }, target = Math.max(-1, Math.min(1, nn.steer)) * MAX_STEER, dt = 0.1;
     let steer = car.steer ?? target;
     for (let t = dt; t < this.scrapeHorizon + 1e-9; t += dt) {
@@ -125,9 +133,10 @@ export class SafetyDriver {
       p.x += car.v * Math.cos(p.h) * dt;
       p.z += car.v * Math.sin(p.h) * dt;
       const moved = (a) => ({ ...a, x: a.x + Math.cos(a.h) * a.v * t, z: a.z + Math.sin(a.h) * a.v * t });
-      if (near.some((a) => touchesVehicle(p, a.v ? moved(a) : a))) return true;
+      if (near.some((a) => touchesVehicle(p, a.v ? moved(a) : a))) return 'vehicle';
+      if (peds.some((q) => touchesPedestrian(p, q.v ? moved(q) : q))) return 'pedestrian';
     }
-    return false;
+    return null;
   }
 
   // Returns the control to apply: the learned driver's, or the expert's during a takeover.
