@@ -166,6 +166,34 @@ test('light-aware speed: brakes to stop at the predicted line for red, not for g
   assert.ok(nn.control({ car: { x: 0, z: 0, h: 0, v: 10 } }).throttle > 0, 'without the cap it would drive on');
 });
 
+test('light gate: the network cannot stop for a light inside an intersection or far from a stop line', async () => {
+  const { NeuralDriver, lightGateOpen } = await import('../src/neural.js');
+  // Drive perfect predictions, except the network "sees" a red light with its line 0 m away
+  // whenever the car is inside or just past an intersection (the stalls in the benchmark).
+  const w = world(2, { cars: 0, peds: 0 }), nn = new NeuralDriver({ hz: 10 });
+  nn.commands = COMMANDS;
+  w.setPolicy(nn);
+  const red = { none: 0, red: 1, yellow: 0, green: 0 };
+  let inBox = 0, gated = 0;
+  for (let t = 0; t < 90 * 60; t++) {
+    if (w.t >= nn.nextObs && w.expertCtrl) {
+      const L = makeLabels(w, w.expertCtrl), d = commandOf(w.expert.route, w.expert.s).dist;
+      const phantom = d < -1 || d > 70; // past the line, or nowhere near the next one
+      if (phantom) inBox++;
+      if (phantom && !lightGateOpen(w.expert.route, w.expert.s)) gated++;
+      nn.setPrediction(w.car, L.command, COMMANDS.map((k) => L.wp[k] ?? L.wp[L.command]), COMMANDS.map(() => L.vTarget),
+        phantom ? { light: red, stopDist: 0 } : { light: { none: 1, red: 0, yellow: 0, green: 0 }, stopDist: null });
+      nn.nextObs = w.t + nn.period;
+    }
+    w.step(1 / 60);
+  }
+  assert.ok(inBox > 50, `phantom-red observations ${inBox}`);
+  assert.equal(gated, inBox, 'gate closed for every phantom red');
+  const stalls = w.safety.events.filter((e) => e.reason === 'did not pull away').length;
+  assert.equal(stalls, 0, JSON.stringify(w.safety.events.map((e) => e.reason)));
+  assert.ok(w.safety.autoDist > 300, `drove ${w.safety.autoDist} m`);
+});
+
 test('labels: the lead obstacle is the one the expert brakes for, clear road is far', () => {
   const w = world(4, { cars: 90 });
   let following = 0, clear = 0;
