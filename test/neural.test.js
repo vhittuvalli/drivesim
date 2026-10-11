@@ -166,6 +166,34 @@ test('light-aware speed: brakes to stop at the predicted line for red, not for g
   assert.ok(nn.control({ car: { x: 0, z: 0, h: 0, v: 10 } }).throttle > 0, 'without the cap it would drive on');
 });
 
+test('light gate: the network cannot stop for a light inside an intersection or far from a stop line', async () => {
+  const { NeuralDriver, lightGateOpen } = await import('../src/neural.js');
+  // Drive perfect predictions, except the network "sees" a red light with its line 0 m away
+  // whenever the car is inside or just past an intersection (the stalls in the benchmark).
+  const w = world(2, { cars: 0, peds: 0 }), nn = new NeuralDriver({ hz: 10 });
+  nn.commands = COMMANDS;
+  w.setPolicy(nn);
+  const red = { none: 0, red: 1, yellow: 0, green: 0 };
+  let inBox = 0, gated = 0;
+  for (let t = 0; t < 90 * 60; t++) {
+    if (w.t >= nn.nextObs && w.expertCtrl) {
+      const L = makeLabels(w, w.expertCtrl), d = commandOf(w.expert.route, w.expert.s).dist;
+      const phantom = d < -1 || d > 70; // past the line, or nowhere near the next one
+      if (phantom) inBox++;
+      if (phantom && !lightGateOpen(w.expert.route, w.expert.s)) gated++;
+      nn.setPrediction(w.car, L.command, COMMANDS.map((k) => L.wp[k] ?? L.wp[L.command]), COMMANDS.map(() => L.vTarget),
+        phantom ? { light: red, stopDist: 0 } : { light: { none: 1, red: 0, yellow: 0, green: 0 }, stopDist: null });
+      nn.nextObs = w.t + nn.period;
+    }
+    w.step(1 / 60);
+  }
+  assert.ok(inBox > 50, `phantom-red observations ${inBox}`);
+  assert.equal(gated, inBox, 'gate closed for every phantom red');
+  const stalls = w.safety.events.filter((e) => e.reason === 'did not pull away').length;
+  assert.equal(stalls, 0, JSON.stringify(w.safety.events.map((e) => e.reason)));
+  assert.ok(w.safety.autoDist > 300, `drove ${w.safety.autoDist} m`);
+});
+
 test('labels: the lead obstacle is the one the expert brakes for, clear road is far', () => {
   const w = world(4, { cars: 90 });
   let following = 0, clear = 0;
@@ -271,6 +299,37 @@ test('time-to-collision cap: brakes in proportion to closing speed, not for movi
   assert.ok(stopped < -3.5 && stopped > -6, `stopped lead: ${stopped}`);
   const cutIn = ttcCap(26.5, 5.5 / 12, 21); // cut-in 12 m ahead, 5.5 m/s slower: needs ~1.3 m/s^2
   assert.ok(cutIn < -1.2 && cutIn > -3, `cut-in: ${cutIn}`);
+});
+
+test('safety driver: takes over before steering into a vehicle beside the car, not for steering past it', () => {
+  const w = world(1, { cars: 0, peds: 0 });
+  w.parked.splice(0, w.parked.length, { kind: 'car', parked: true, x: 4, z: -2.2, h: 0, v: 0, halfLen: 2.3 });
+  Object.assign(w.car, { x: 0, z: 0, h: 0, v: 4, steer: 0 }); // heading +x; the parked car is ahead-left
+  const sd = w.safety;
+  assert.equal(sd.willScrape(w, { steer: -1, throttle: 0 }), 'vehicle', 'hard left into it');
+  assert.equal(sd.willScrape(w, { steer: 0, throttle: 0 }), null, 'straight past it');
+  assert.equal(sd.willScrape(w, { steer: 0.5, throttle: 0 }), null, 'away from it');
+  w.car.v = 0;
+  assert.equal(sd.willScrape(w, { steer: -1, throttle: 0 }), null, 'stopped');
+  // A car just ahead moving at our speed isn't a scrape; the same car stopped is.
+  w.parked.length = 0;
+  const ahead = { kind: 'car', x: 5.2, z: 0, h: 0, v: 4, halfLen: 2.3 };
+  w.traffic = { agents: [ahead] };
+  w.car.v = 4;
+  assert.equal(sd.willScrape(w, { steer: 0, throttle: 0 }), null, 'following');
+  ahead.v = 0;
+  assert.equal(sd.willScrape(w, { steer: 0, throttle: 0 }), 'vehicle', 'closing on a stopped car');
+  // Pedestrians too: creeping at 0.6 m/s into one standing just ahead (a contact in fog), but not
+  // for one walking across well ahead of the car, or standing on the sidewalk beside it.
+  w.traffic = { agents: [] };
+  w.crowd = { peds: [{ x: 2.9, z: 0, h: 0, v: 0 }] };
+  w.car.v = 0.6;
+  assert.equal(sd.willScrape(w, { steer: 0, throttle: 0.2 }), 'pedestrian', 'creeping into a pedestrian');
+  w.crowd = { peds: [{ x: 9, z: -1, h: Math.PI / 2, v: 1.4 }] };
+  assert.equal(sd.willScrape(w, { steer: 0, throttle: 0.2 }), null, 'crossing well ahead');
+  w.crowd = { peds: [{ x: 1, z: -3, h: 0, v: 0 }] };
+  w.car.v = 4;
+  assert.equal(sd.willScrape(w, { steer: 0, throttle: 0 }), null, 'on the sidewalk beside');
 });
 
 test('safety driver: drifting right during an overtake is taken over before touching parked cars', () => {

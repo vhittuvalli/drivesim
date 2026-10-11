@@ -5,13 +5,48 @@
 // stallGrace), or is closing on an obstacle with under ttcMin seconds to impact while braking less
 // than the expert, the expert takes over for a few seconds (a disengagement). The headline
 // metric is autonomous distance per disengagement, as reported by real AV programs.
-import { angleWrap } from './planner.js';
+import { angleWrap, HALF_LEN } from './planner.js';
+import { WHEELBASE, MAX_STEER } from './config.js';
 
 export const TAKEOVER_SECONDS = 3;
 
+const r2 = (x) => (typeof x === 'number' ? Math.round(x * 100) / 100 : x);
+
+// What the learned driver and the expert saw and wanted at a takeover, to tell why it happened
+// (e.g. a stall at a green light held by the network's own light brake).
+function takeoverContext(world, exp, nn) {
+  const p = world.policy?.pred;
+  return {
+    v: r2(world.car.v),
+    nn: { throttle: r2(nn.throttle), vTarget: r2(nn.vTarget), lightStop: !!nn.lightStop, leadBrake: !!nn.leadBrake },
+    expert: { acc: r2(exp.acc), throttle: r2(exp.throttle), reason: exp.reason ?? null },
+    signal: exp.signal ? { state: exp.signal.state ?? null, dist: r2(exp.signal.dist) } : null,
+    lead: exp.lead && exp.lead.gap < 80 ? { gap: r2(exp.lead.gap), v: r2(exp.lead.v) } : null,
+    seen: p ? {
+      light: p.light ? Object.fromEntries(Object.entries(p.light).map(([k, v]) => [k, r2(v)])) : null,
+      stopDist: r2(p.stopDist ?? null), lead: p.lead ? { gap: r2(p.lead.gap), v: r2(p.lead.v) } : null,
+    } : null,
+  };
+}
+
+// Whether a car at `pose` (x, z, h; the ego's size) touches vehicle `a`: points along a's axis
+// inside the ego's footprint grown by a's half width. The benchmark counts contacts with this.
+export function touchesPedestrian(pose, p) {
+  const dx = p.x - pose.x, dz = p.z - pose.z, c = Math.cos(pose.h), s = Math.sin(pose.h);
+  return Math.abs(dx * c + dz * s) < HALF_LEN + 0.25 && Math.abs(-dx * s + dz * c) < 0.92 + 0.25;
+}
+
+export function touchesVehicle(pose, a) {
+  const e = a.halfLen - 0.75, c = Math.cos(pose.h), s = Math.sin(pose.h);
+  return [-e, 0, e].some((k) => {
+    const dx = a.x + Math.cos(a.h) * k - pose.x, dz = a.z + Math.sin(a.h) * k - pose.z;
+    return Math.abs(dx * c + dz * s) < HALF_LEN + 0.6 && Math.abs(-dx * s + dz * c) < 0.92 + 0.85;
+  });
+}
+
 export class SafetyDriver {
-  constructor({ maxLateral = 1.1, maxHeading = 0.45, brakeDemand = -3, brakeGrace = 0.3, stallGrace = 2.5, ttcMin = 2, ttcGrace = 0.2, maxLateralOvertake = 1.5 } = {}) {
-    Object.assign(this, { maxLateral, maxHeading, brakeDemand, brakeGrace, stallGrace, ttcMin, ttcGrace, maxLateralOvertake });
+  constructor({ maxLateral = 1.1, maxHeading = 0.45, brakeDemand = -3, brakeGrace = 0.3, stallGrace = 2.5, ttcMin = 2, ttcGrace = 0.2, maxLateralOvertake = 1.5, scrapeHorizon = 0.8 } = {}) {
+    Object.assign(this, { maxLateral, maxHeading, brakeDemand, brakeGrace, stallGrace, ttcMin, ttcGrace, maxLateralOvertake, scrapeHorizon });
     this.enabled = true;
     this.reset();
   }
@@ -69,10 +104,37 @@ export class SafetyDriver {
     const risk = !!L && L.gap < 80 && rate > 0.5 && L.gap / rate < ttcMin && nn.throttle > exp.throttle + 0.3;
     this.closing = risk ? this.closing + dt : 0;
     if (risk && this.closing > this.ttcGrace) return 'collision risk';
+    const scrape = this.willScrape(world, nn);
+    if (scrape) return scrape === 'pedestrian' ? 'about to hit a pedestrian' : 'about to scrape a vehicle';
     const under = exp.acc < this.brakeDemand && car.v > 1 && nn.throttle > exp.throttle + 0.35;
     this.underBraking = under ? this.underBraking + dt : 0;
     if (under && this.underBraking > this.brakeGrace) {
       return { pedestrian: 'late braking for a pedestrian', signal: 'about to run a red light', crossing: 'late braking for a crossing vehicle' }[exp.reason] ?? 'late braking';
+    }
+    return null;
+  }
+
+  // Rolling the learned driver's steering forward scrapeHorizon seconds at the current speed (and
+  // other road users straight on at theirs), the car would touch a vehicle or pedestrian it isn't
+  // touching now. The lane, heading and lead checks missed the network clipping a parked car beside
+  // its path at 4 m/s, and creeping at 0.6 m/s into a pedestrian standing 2.6 m ahead in fog.
+  willScrape(world, nn) {
+    const { car } = world;
+    if (car.v < 0.5 || !world.traffic) return null;
+    const close = (a) => Math.abs(a.x - car.x) < 12 && Math.abs(a.z - car.z) < 12;
+    const near = [...world.traffic.agents, ...(world.parked ?? []).filter((p) => !p.hidden)].filter((a) => close(a) && !touchesVehicle(car, a));
+    const peds = (world.crowd?.peds ?? []).filter((p) => close(p) && !touchesPedestrian(car, p));
+    if (!near.length && !peds.length) return null;
+    const p = { x: car.x, z: car.z, h: car.h }, target = Math.max(-1, Math.min(1, nn.steer)) * MAX_STEER, dt = 0.1;
+    let steer = car.steer ?? target;
+    for (let t = dt; t < this.scrapeHorizon + 1e-9; t += dt) {
+      steer += Math.max(-1.6 * dt, Math.min(1.6 * dt, target - steer));
+      p.h += (car.v / WHEELBASE) * Math.tan(steer) * dt;
+      p.x += car.v * Math.cos(p.h) * dt;
+      p.z += car.v * Math.sin(p.h) * dt;
+      const moved = (a) => ({ ...a, x: a.x + Math.cos(a.h) * a.v * t, z: a.z + Math.sin(a.h) * a.v * t });
+      if (near.some((a) => touchesVehicle(p, a.v ? moved(a) : a))) return 'vehicle';
+      if (peds.some((q) => touchesPedestrian(p, q.v ? moved(q) : q))) return 'pedestrian';
     }
     return null;
   }
@@ -91,7 +153,7 @@ export class SafetyDriver {
     const reason = this.enabled ? this.check(world, exp, nn, dt) : null;
     if (reason) {
       this.takeover = TAKEOVER_SECONDS;
-      this.events.push({ t: world.t, reason, x: world.car.x, z: world.car.z });
+      this.events.push({ t: world.t, reason, x: world.car.x, z: world.car.z, ctx: takeoverContext(world, exp, nn) });
       return { ...exp, driver: 'safety', nn, expert: exp, disengaged: reason };
     }
     this.autoDist += d;

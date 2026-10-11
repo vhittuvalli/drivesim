@@ -140,13 +140,22 @@ async function bench() {
       if (st?.bench?.summary) return { seed, model: st.model, summary: st.bench.summary, results: st.bench.results };
       console.log(`[${seed}] benchmark did not finish${st?.lost ? ' (lost the GPU context)' : ''}${attempt === 0 ? '; starting it again' : ''}`);
     }
-    throw new Error(`benchmark for seed ${seed} did not finish`);
+    return null;
   };
-  const runs = [], queue = [...seeds];
+  // A city that fails twice (e.g. the network dropped while loading) is reported and left out;
+  // the cities that finished are still written.
+  const runs = [], failed = [], queue = [...seeds];
   await Promise.all(Array.from({ length: Math.min(Number(opt.parallel), seeds.length) }, async () => {
-    while (queue.length) runs.push(await runOne(queue.shift()));
+    while (queue.length) {
+      const seed = queue.shift(), r = await runOne(seed);
+      if (r) runs.push(r);
+      else failed.push(seed);
+    }
   }));
+  if (!runs.length) throw new Error(`no benchmark finished (seeds ${failed.join(',')})`);
+  if (failed.length) console.log(`left out seed(s) ${failed.join(',')}: did not finish twice`);
   runs.sort((a, b) => a.seed - b.seed);
+  seeds.splice(0, seeds.length, ...runs.map((r) => r.seed));
   const results = runs.flatMap((r) => r.results.map((x) => ({ seed: r.seed, ...x })));
   const total = (f) => runs.reduce((a, r) => a + f(r.summary), 0);
   const drives = results.filter((r) => r.kind === 'drive');

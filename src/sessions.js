@@ -169,7 +169,7 @@ export class Benchmark {
     this.app.startScenario(item.kind === 'scenario' ? item.id : '');
     this.neural.reset();
     w.safety.takeover = 0;
-    this.mark = { t: w.t, events: w.safety.events.length, auto: w.safety.autoDist, total: w.safety.totalDist, contacts: w.contacts };
+    this.mark = { t: w.t, events: w.safety.events.length, auto: w.safety.autoDist, total: w.safety.totalDist, contacts: w.contacts, log: w.contactLog.length };
   }
 
   update() {
@@ -191,8 +191,10 @@ export class Benchmark {
     this.results.push({
       kind: item.kind, id: item.id, name: item.name, trial: item.trial ?? null, road: item.kind === 'scenario' ? (SCENARIOS[item.id].road ?? 'city') : item.cond.road, weather: item.cond.weather, hour: item.cond.hour, ...extra,
       takeovers: events.length, reasons: events.map((e) => e.reason),
+      takeoverLog: events.map((e) => ({ t: Math.round((e.t - m.t) * 10) / 10, reason: e.reason, ...e.ctx })),
       autoDist: w.safety.autoDist - m.auto, dist: w.safety.totalDist - m.total,
       contacts: item.kind === 'scenario' ? w.contacts : w.contacts - m.contacts,
+      ...(w.contactLog.length > m.log ? { contactLog: w.contactLog.slice(m.log) } : {}),
     });
     this.next();
   }

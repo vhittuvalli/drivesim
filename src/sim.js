@@ -7,7 +7,7 @@ import { Signals } from './signals.js';
 import { Traffic } from './traffic.js';
 import { Crowd } from './peds.js';
 import { SCENARIOS } from './scenarios.js';
-import { SafetyDriver } from './safety.js';
+import { SafetyDriver, touchesVehicle, touchesPedestrian } from './safety.js';
 import { HW, HW_LENGTH, HighwayRoute, highwayPose, onHighway, loopDist, laneOffset, lanePoint } from './highway.js';
 
 export const WEATHER = {
@@ -71,8 +71,10 @@ export class World {
     this.expertCtrl = null; // what the expert did or would have done this step (labels)
     this.scenario = null;
     this.contacts = 0;
+    this.contactLog = []; // details of each contact (see detectContacts)
     this.lastContact = null;
     this.touching = new Set();
+    this.untouched = new Map(); // key -> when that touch last broke off
     this.ctrl = null;
     this.hiddenParked = [];
   }
@@ -124,24 +126,35 @@ export class World {
   // Count new contacts between the ego footprint and any vehicle or pedestrian.
   detectContacts() {
     const ego = this.car;
-    const mark = (key, hit, what) => {
-      if (hit && !this.touching.has(key)) {
+    const mark = (key, hit, what, other = null) => {
+      // A touch that breaks off and resumes within a second is the same contact (a car scraping
+      // along ours flickered in and out of the box and counted three times).
+      if (hit && !this.touching.has(key) && !(this.t - (this.untouched.get(key) ?? -Infinity) < 1)) {
         this.contacts++;
         this.lastContact = { what, t: this.t };
+        // Enough to tell what went wrong without a replay: who was driving, how fast, and where
+        // the other party was relative to us (x forward, y left).
+        const dx = other.x - ego.x, dz = other.z - ego.z, c = Math.cos(ego.h), s = Math.sin(ego.h);
+        const lastTakeover = this.safety?.events.at(-1);
+        this.contactLog.push({
+          t: this.t, what, x: ego.x, z: ego.z, v: ego.v, otherV: other.v ?? 0,
+          rel: [dx * c + dz * s, dx * s - dz * c].map((d) => Math.round(d * 10) / 10),
+          driver: this.ctrl?.driver ?? (this.policy ? 'neural' : 'expert'),
+          lastTakeover: lastTakeover ? { reason: lastTakeover.reason, ago: this.t - lastTakeover.t } : null,
+        });
       }
       if (hit) this.touching.add(key);
-      else this.touching.delete(key);
+      else if (this.touching.delete(key)) this.untouched.set(key, this.t);
     };
     const cars = [...this.traffic.agents, ...this.parked.filter((p) => !p.hidden)];
     for (const a of cars) {
       if (Math.abs(a.x - ego.x) > 8 || Math.abs(a.z - ego.z) > 8) continue;
-      const e = a.halfLen - 0.75;
-      const hit = [-e, 0, e].some((k) => inBox(ego, a.x + Math.cos(a.h) * k, a.z + Math.sin(a.h) * k, HALF_LEN + 0.6, 0.92 + 0.85));
-      mark(`c${a.id ?? `${a.x},${a.z}`}`, hit, a.parked ? 'a parked car' : 'a vehicle');
+      const hit = touchesVehicle(ego, a);
+      mark(`c${a.id ?? `${a.x},${a.z}`}`, hit, a.parked ? 'a parked car' : 'a vehicle', a);
     }
     for (const p of this.crowd.peds) {
       if (Math.abs(p.x - ego.x) > 5 || Math.abs(p.z - ego.z) > 5) continue;
-      mark(`p${p.id}`, inBox(ego, p.x, p.z, HALF_LEN + 0.25, 0.92 + 0.25), 'a pedestrian');
+      mark(`p${p.id}`, touchesPedestrian(ego, p), 'a pedestrian', p);
     }
   }
 
@@ -209,6 +222,7 @@ export class World {
     this.expert.setRoute(route);
     this.expert.track(this.car);
     this.touching.clear();
+    this.untouched.clear();
   }
 
   // Put the ego on a highway lane at progress q (see highway.js).
@@ -219,6 +233,7 @@ export class World {
     this.expert.setRoute(route);
     this.expert.track(this.car);
     this.touching.clear();
+    this.untouched.clear();
   }
 
   // Move the ego between the city streets and the highway (no-op if it's already there).
@@ -241,6 +256,7 @@ export class World {
       this.expert.setRoute(route);
       this.expert.track(this.car);
       this.touching.clear();
+      this.untouched.clear();
     }
     this.manual = null;
   }
@@ -308,7 +324,9 @@ export class World {
     def.setup(this, run);
     for (const c of this.traffic.cars) if (!before.has(c)) c.scenario = true;
     this.contacts = 0;
+    this.contactLog = []; // details of each contact (see detectContacts)
     this.touching.clear();
+    this.untouched.clear();
     return run;
   }
 
