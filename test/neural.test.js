@@ -306,19 +306,30 @@ test('safety driver: takes over before steering into a vehicle beside the car, n
   w.parked.splice(0, w.parked.length, { kind: 'car', parked: true, x: 4, z: -2.2, h: 0, v: 0, halfLen: 2.3 });
   Object.assign(w.car, { x: 0, z: 0, h: 0, v: 4, steer: 0 }); // heading +x; the parked car is ahead-left
   const sd = w.safety;
-  assert.equal(sd.willScrape(w, { steer: -1, throttle: 0 }), true, 'hard left into it');
-  assert.equal(sd.willScrape(w, { steer: 0, throttle: 0 }), false, 'straight past it');
-  assert.equal(sd.willScrape(w, { steer: 0.5, throttle: 0 }), false, 'away from it');
+  assert.equal(sd.willScrape(w, { steer: -1, throttle: 0 }), 'vehicle', 'hard left into it');
+  assert.equal(sd.willScrape(w, { steer: 0, throttle: 0 }), null, 'straight past it');
+  assert.equal(sd.willScrape(w, { steer: 0.5, throttle: 0 }), null, 'away from it');
   w.car.v = 0;
-  assert.equal(sd.willScrape(w, { steer: -1, throttle: 0 }), false, 'stopped');
+  assert.equal(sd.willScrape(w, { steer: -1, throttle: 0 }), null, 'stopped');
   // A car just ahead moving at our speed isn't a scrape; the same car stopped is.
   w.parked.length = 0;
   const ahead = { kind: 'car', x: 5.2, z: 0, h: 0, v: 4, halfLen: 2.3 };
   w.traffic = { agents: [ahead] };
   w.car.v = 4;
-  assert.equal(sd.willScrape(w, { steer: 0, throttle: 0 }), false, 'following');
+  assert.equal(sd.willScrape(w, { steer: 0, throttle: 0 }), null, 'following');
   ahead.v = 0;
-  assert.equal(sd.willScrape(w, { steer: 0, throttle: 0 }), true, 'closing on a stopped car');
+  assert.equal(sd.willScrape(w, { steer: 0, throttle: 0 }), 'vehicle', 'closing on a stopped car');
+  // Pedestrians too: creeping at 0.6 m/s into one standing just ahead (a contact in fog), but not
+  // for one walking across well ahead of the car, or standing on the sidewalk beside it.
+  w.traffic = { agents: [] };
+  w.crowd = { peds: [{ x: 2.9, z: 0, h: 0, v: 0 }] };
+  w.car.v = 0.6;
+  assert.equal(sd.willScrape(w, { steer: 0, throttle: 0.2 }), 'pedestrian', 'creeping into a pedestrian');
+  w.crowd = { peds: [{ x: 9, z: -1, h: Math.PI / 2, v: 1.4 }] };
+  assert.equal(sd.willScrape(w, { steer: 0, throttle: 0.2 }), null, 'crossing well ahead');
+  w.crowd = { peds: [{ x: 1, z: -3, h: 0, v: 0 }] };
+  w.car.v = 4;
+  assert.equal(sd.willScrape(w, { steer: 0, throttle: 0 }), null, 'on the sidewalk beside');
 });
 
 test('safety driver: drifting right during an overtake is taken over before touching parked cars', () => {
