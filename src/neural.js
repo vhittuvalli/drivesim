@@ -17,7 +17,7 @@
 // own speed and braked late for cars ahead, so networks with a lead output (gap to the obstacle on
 // the path and its speed) get the expert's car-following model (IDM) as a second cap.
 import { clamp, WHEELBASE, MAX_STEER, conditions } from './config.js';
-import { throttleFor, idm, IDM } from './planner.js';
+import { throttleFor, idm, IDM, HALF_LEN } from './planner.js';
 import { commandOf, toEgo, TARGET_HORIZON, COMMANDS } from './labels.js';
 
 const ORT_VERSION = '1.30.0';
@@ -84,6 +84,19 @@ export function lightCap(v, d, pRed, pYellow, belief = pRed + pYellow) {
   const need = -(v * v) / (2 * room); // constant deceleration that stops at the margin
   // Far enough away: just don't speed up toward the light; brake once it takes real deceleration.
   return need > -LIGHT_STOP.comfortDecel ? Math.min(0, need) : need;
+}
+
+// Map gating for the light cap: the route (the navigation that also gives the turn commands, as a
+// real car's map would) says where stop lines are. The network's light brake acts only with a
+// stop line from 1 m behind the bumper to `range` ahead: 85% of its stalls were in or just past an
+// intersection, where it saw a red light with its stop line "0 m" away and held the car at a green.
+export const LIGHT_GATE = { behind: 1, range: 60 };
+
+export function lightGateOpen(route, s) {
+  if (!route) return true; // no map: the network's own stop distance decides, as before
+  if (route.highway) return false;
+  const d = commandOf(route, s).dist - HALF_LEN; // front bumper to the stop line
+  return d > -LIGHT_GATE.behind && d < LIGHT_GATE.range;
 }
 
 export const LEAD = { range: 60, brake: -0.3, maxValErr: 5 }; // maxValErr: m, gap error within 30 m on validation
@@ -272,7 +285,7 @@ export class NeuralDriver {
     const pts = this.path.map((q) => toEgo(car, q.x, q.z));
     const traveled = toEgo(p.pose, car.x, car.z)[0]; // since the observation
     let light = null, lead = null;
-    if (this.lightAware && p.light && p.stopDist !== null && p.stopDist !== undefined) {
+    if (this.lightAware && p.light && p.stopDist !== null && p.stopDist !== undefined && lightGateOpen(world.expert?.route, world.expert?.s)) {
       light = lightCap(car.v, p.stopDist - traveled, p.light.red, p.light.yellow, this.stopBelief);
     }
     if (this.leadAware && p.lead) {
