@@ -10,6 +10,25 @@ import { WHEELBASE, MAX_STEER } from './config.js';
 
 export const TAKEOVER_SECONDS = 3;
 
+const r2 = (x) => (typeof x === 'number' ? Math.round(x * 100) / 100 : x);
+
+// What the learned driver and the expert saw and wanted at a takeover, to tell why it happened
+// (e.g. a stall at a green light held by the network's own light brake).
+function takeoverContext(world, exp, nn) {
+  const p = world.policy?.pred;
+  return {
+    v: r2(world.car.v),
+    nn: { throttle: r2(nn.throttle), vTarget: r2(nn.vTarget), lightStop: !!nn.lightStop, leadBrake: !!nn.leadBrake },
+    expert: { acc: r2(exp.acc), throttle: r2(exp.throttle), reason: exp.reason ?? null },
+    signal: exp.signal ? { state: exp.signal.state ?? null, dist: r2(exp.signal.dist) } : null,
+    lead: exp.lead && exp.lead.gap < 80 ? { gap: r2(exp.lead.gap), v: r2(exp.lead.v) } : null,
+    seen: p ? {
+      light: p.light ? Object.fromEntries(Object.entries(p.light).map(([k, v]) => [k, r2(v)])) : null,
+      stopDist: r2(p.stopDist ?? null), lead: p.lead ? { gap: r2(p.lead.gap), v: r2(p.lead.v) } : null,
+    } : null,
+  };
+}
+
 // Whether a car at `pose` (x, z, h; the ego's size) touches vehicle `a`: points along a's axis
 // inside the ego's footprint grown by a's half width. The benchmark counts contacts with this.
 export function touchesVehicle(pose, a) {
@@ -125,7 +144,7 @@ export class SafetyDriver {
     const reason = this.enabled ? this.check(world, exp, nn, dt) : null;
     if (reason) {
       this.takeover = TAKEOVER_SECONDS;
-      this.events.push({ t: world.t, reason, x: world.car.x, z: world.car.z });
+      this.events.push({ t: world.t, reason, x: world.car.x, z: world.car.z, ctx: takeoverContext(world, exp, nn) });
       return { ...exp, driver: 'safety', nn, expert: exp, disengaged: reason };
     }
     this.autoDist += d;
