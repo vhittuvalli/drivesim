@@ -107,6 +107,9 @@ def main():
     ap.add_argument('--init', default=None, help='checkpoint to start from (DAgger fine-tuning)')
     ap.add_argument('--resume', action='store_true', help='continue an interrupted run from <out>.last.pt')
     ap.add_argument('--retries', type=int, default=3, help='restarts of an epoch after a data-loader failure (e.g. after sleep)')
+    ap.add_argument('--encoder', choices=['scratch', 'mobilenet'], default=None,
+                    help='main-camera encoder (default: the --init checkpoint\'s, else scratch); mobilenet starts from ImageNet weights')
+    ap.add_argument('--encoder-lr', type=float, default=0.3, help='learning-rate factor for a pretrained encoder')
     ap.add_argument('--speed-dropout', type=float, default=0.5, help='share of training samples whose speed is hidden from the target-speed heads')
     a = ap.parse_args()
 
@@ -133,15 +136,21 @@ def main():
 
     train_dl, val_dl = loaders()
 
-    model = Policy().to(device)
+    init_ck = torch.load(a.init, map_location='cpu') if a.init else {}
+    init_arch = init_ck.get('arch', {'encoder': 'scratch'})
+    encoder = a.encoder or init_arch['encoder']
+    # A new pretrained encoder starts from ImageNet; one the checkpoint already has, from the checkpoint.
+    model = Policy(encoder, pretrained=encoder == 'mobilenet' and init_arch['encoder'] != 'mobilenet').to(device)
+    arch = {'encoder': encoder}
     if a.init:
         own = model.state_dict()
-        ck = torch.load(a.init, map_location='cpu')['model']
+        ck = init_ck['model']
         init = {k: v for k, v in ck.items() if k in own and own[k].shape == v.shape}
         # A checkpoint from before the older past frame: its first fc layer takes [current, change
         # since 0.3 s]. Keep those weights and start the new change-since-1 s inputs at zero, so the
         # network begins exactly where the checkpoint was and learns to use them.
-        fw = ck.get('fc.1.weight')
+        # (Same encoder only: with a different one the fc layer reads different features and starts fresh.)
+        fw = ck.get('fc.1.weight') if init_arch['encoder'] == encoder else None
         if fw is not None and fw.shape != own['fc.1.weight'].shape and fw.shape[0] == own['fc.1.weight'].shape[0]:
             w = torch.zeros_like(own['fc.1.weight'])
             w[:, : fw.shape[1]] = fw
@@ -161,7 +170,13 @@ def main():
                     sh[2].bias.copy_(h[2].bias[-1:])
                     print(f'target-speed head {i} initialized from the combined head')
         print(f'fine-tuning from {a.init}')
-    opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=1e-4)
+    # A pretrained encoder learns more slowly than the rest, so fine-tuning adapts its ImageNet features
+    # instead of overwriting them.
+    enc = [p for n, p in model.named_parameters() if n.startswith(('m2.', 'm3.', 'm5.', 'm6.'))]
+    rest = [p for n, p in model.named_parameters() if not n.startswith(('m2.', 'm3.', 'm5.', 'm6.'))]
+    groups = [{'params': rest}] + ([{'params': enc, 'lr': a.lr * a.encoder_lr}] if enc else [])
+    opt = torch.optim.AdamW(groups, lr=a.lr, weight_decay=1e-4)
+    print(f'encoder: {encoder}' + (f' (ImageNet weights, learning rate x{a.encoder_lr})' if enc else ''))
     steps = a.epochs * len(train_dl)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda i: 0.5 * (1 + math.cos(math.pi * min(i, steps) / steps)))
     print(f'training on {device}: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M parameters, {steps} steps')
@@ -221,8 +236,8 @@ def main():
         tag = ''
         if score < best:
             best, best_metrics, tag = score, m, '  * best'
-            torch.save({'model': model.state_dict(), 'epoch': epoch, 'metrics': m}, a.out + '.pt')
-        torch.save({'model': model.state_dict(), 'opt': opt.state_dict(), 'sched': sched.state_dict(), 'epoch': epoch,
+            torch.save({'model': model.state_dict(), 'arch': arch, 'epoch': epoch, 'metrics': m}, a.out + '.pt')
+        torch.save({'model': model.state_dict(), 'arch': arch, 'opt': opt.state_dict(), 'sched': sched.state_dict(), 'epoch': epoch,
                     'best': best, 'best_metrics': best_metrics}, last_path)
         print(
             f'epoch {epoch:2d}  train {run_loss / len(train_dl):.3f}  val wp {m["wp"]:.3f} m  lateral@8m {m["lateral_at_8m"]:.2f} m  '
@@ -233,11 +248,11 @@ def main():
     info = {
         'trained': datetime.now(timezone.utc).isoformat(timespec='seconds'),
         'frames': len(train_items), 'runs': len(runs), 'drivers': by_driver, 'epoch': ck['epoch'],
-        'val': {k: round(v, 4) for k, v in best_metrics.items()}, 'init': a.init,
+        'val': {k: round(v, 4) for k, v in best_metrics.items()}, 'init': a.init, 'encoder': encoder,
     }
     ck['info'] = info
     torch.save(ck, a.out + '.pt')
-    model = Policy()
+    model = Policy(**ck.get('arch', {}))
     model.load_state_dict(ck['model'])
     export(model, a.out, info)
 

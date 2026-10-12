@@ -76,6 +76,6 @@ if __name__ == '__main__':
     ap.add_argument('--out', default=None, help='output base path (default: checkpoint without .pt)')
     a = ap.parse_args()
     ck = torch.load(a.checkpoint, map_location='cpu')
-    model = Policy()
+    model = Policy(**ck.get('arch', {}))
     model.load_state_dict(ck['model'])
     export(model, a.out or a.checkpoint.removesuffix('.pt'), ck.get('info'))
