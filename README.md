@@ -156,6 +156,12 @@ without takeovers, meters of autonomous driving per takeover, contacts.
     npm run train -- --init models/policy.pt --epochs 6                  # fine-tune on all of data/
     npm run bench -- --seeds 1,2,3 --out models/bench.json               # three cities, combined
 
+**Improvement loop.** `node scripts/improve.mjs --rounds 4` runs unattended (overnight): each round
+the best model drives 12 new cities while the expert labels, mostly in the scenarios it failed most;
+the model is fine-tuned on all of `data/`, benchmarked on cities 1-9, and kept (and committed, never
+pushed) only with fewer takeovers and no more contacts. Results go to `models/loop/history.md`;
+creating `models/loop/STOP` ends it after the current round.
+
 `scripts/headless.mjs` runs the app in headless Chrome (set `CHROME=` if it isn't found), one browser per
 city seed. A browser that loses its GPU context is restarted for the frames still owed, and
 uploads retry. Training saves `models/policy.last.pt` every epoch: `npm run train -- --resume` continues

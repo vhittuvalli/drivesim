@@ -24,7 +24,9 @@ const LOOP = path.join(ROOT, 'models', 'loop');
 const { values: opt } = parseArgs({
   options: {
     rounds: { type: 'string', default: '4' },
-    'eval-seeds': { type: 'string', default: '4,5,6,7,8,9' }, // benchmark cities: never collected on
+    // Benchmark cities, never collected on. Nine, not six: always picking the best model on the
+    // same six cities partly picked models that suited them (a 29% gain there, 7% on cities 1-3).
+    'eval-seeds': { type: 'string', default: '1,2,3,4,5,6,7,8,9' },
     cities: { type: 'string', default: '12' }, // new cities per round
     frames: { type: 'string', default: '2000' }, // frames per city
     epochs: { type: 'string', default: '3' },
