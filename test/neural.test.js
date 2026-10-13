@@ -332,6 +332,30 @@ test('safety driver: takes over before steering into a vehicle beside the car, n
   assert.equal(sd.willScrape(w, { steer: 0, throttle: 0 }), null, 'on the sidewalk beside');
 });
 
+test('safety driver: trailing the expert swing out and merge back is not a lane takeover', () => {
+  for (const seed of [1, 3]) {
+    const id = 'overtake-parked', w = world(seed, { cars: 0, peds: 0 });
+    // The expert's own steering, 0.25 s late during overtakes: trails like the network did in the
+    // benchmark (~1.1 m out, ~1.5-1.8 m back). Much later (0.4 s) is a real danger, and the
+    // scrape check takes over then.
+    const lag = [];
+    w.setPolicy({ control: (world, exp) => {
+      lag.push(exp.steer);
+      const late = lag.length > 15 ? lag.shift() : exp.steer;
+      return { steer: world.expert.ot.active || world.t - world.safety.overtakeEnd < 1 ? late : exp.steer, throttle: exp.throttle };
+    } });
+    const run = w.startScenario(id);
+    let worst = 0;
+    while (run.status === 'running') {
+      w.step(1 / 60);
+      if (w.expert.ot.active) worst = Math.max(worst, Math.abs(w.expert.lateral));
+    }
+    assert.ok(worst > 1.5, `${id}: trailed by ${worst.toFixed(2)} m (beyond the old overtake limit)`);
+    assert.equal(w.contacts, 0, `${id}: ${run.message}`);
+    assert.equal(w.safety.events.filter((e) => e.reason === 'left the lane').length, 0, JSON.stringify(w.safety.events.map((e) => e.reason)));
+  }
+});
+
 test('safety driver: drifting right during an overtake is taken over before touching parked cars', () => {
   for (const seed of [1, 2, 3]) {
     const w = world(seed, { cars: 0, peds: 0 });

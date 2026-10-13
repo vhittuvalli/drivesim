@@ -12,12 +12,25 @@ export const TAKEOVER_SECONDS = 3;
 
 const r2 = (x) => (typeof x === 'number' ? Math.round(x * 100) / 100 : x);
 
+// Where the expert's overtake is: 'out' (swinging into the oncoming lane), 'passing', 'back'
+// (merging back), 'ended' (within 2 s after), or null when there is none.
+function overtakePhase(expert, sinceEnd) {
+  const a = expert?.ot?.active;
+  if (!a) return sinceEnd < 2 ? { phase: 'ended', since: r2(sinceEnd) } : null;
+  const s = expert.s;
+  const phase = s < a.s0 + a.ramp ? 'out' : a.s1 === null || s < a.s1 ? 'passing' : 'back';
+  return { phase, offset: r2(expert.ot.offsetAt(s)), full: r2(a.off), aborted: !!a.aborted };
+}
+
 // What the learned driver and the expert saw and wanted at a takeover, to tell why it happened
 // (e.g. a stall at a green light held by the network's own light brake).
-function takeoverContext(world, exp, nn) {
-  const p = world.policy?.pred;
+function takeoverContext(world, exp, nn, overtakeEnd = -Infinity) {
+  const p = world.policy?.pred, { expert } = world;
   return {
     v: r2(world.car.v),
+    // Sideways from the expert's path (overtake swerve included): > 0 right of it, < 0 left.
+    lateral: r2(expert?.lateral ?? null),
+    overtake: overtakePhase(expert, world.t - overtakeEnd),
     nn: { throttle: r2(nn.throttle), vTarget: r2(nn.vTarget), lightStop: !!nn.lightStop, leadBrake: !!nn.leadBrake },
     expert: { acc: r2(exp.acc), throttle: r2(exp.throttle), reason: exp.reason ?? null },
     signal: exp.signal ? { state: exp.signal.state ?? null, dist: r2(exp.signal.dist) } : null,
@@ -45,7 +58,7 @@ export function touchesVehicle(pose, a) {
 }
 
 export class SafetyDriver {
-  constructor({ maxLateral = 1.1, maxHeading = 0.45, brakeDemand = -3, brakeGrace = 0.3, stallGrace = 2.5, ttcMin = 2, ttcGrace = 0.2, maxLateralOvertake = 1.5, scrapeHorizon = 0.8 } = {}) {
+  constructor({ maxLateral = 1.1, maxHeading = 0.45, brakeDemand = -3, brakeGrace = 0.3, stallGrace = 2.5, ttcMin = 2, ttcGrace = 0.2, maxLateralOvertake = 1.8, scrapeHorizon = 0.8 } = {}) {
     Object.assign(this, { maxLateral, maxHeading, brakeDemand, brakeGrace, stallGrace, ttcMin, ttcGrace, maxLateralOvertake, scrapeHorizon });
     this.enabled = true;
     this.reset();
@@ -74,13 +87,18 @@ export class SafetyDriver {
   // Why the expert should take over right now, or null.
   check(world, exp, nn, dt = 0) {
     const { expert, car } = world;
-    // During an overtake (the expert checked the oncoming lane is clear) the path itself swings
-    // across; a 10 Hz driver following it trails the merge back by ~1.1 m to the left even with
-    // perfect predictions, so allow a little more there, and for a second after while it settles.
-    // Only to the left (lateral < 0): to the right are parked cars, and 1.5 m that way is contact.
-    if (expert.ot?.active) this.overtakeEnd = world.t;
-    const lenient = world.t - this.overtakeEnd < 1 && expert.lateral < 0;
-    if (Math.abs(expert.lateral) > (lenient ? this.maxLateralOvertake : this.maxLateral)) return 'left the lane';
+    // During an overtake the path itself swings across, and a driver that can't know the expert's
+    // exact timing trails it: still in its own lane as the path swings out (right of it), still in
+    // the oncoming lane as the path merges back (left of it). Neither is the danger: the vehicle
+    // being passed is covered by the collision-risk, late-braking and scrape checks, and the
+    // oncoming lane was checked clear by the expert. So allow maxLateralOvertake to the left
+    // throughout and for a second after, and to the right while the path is still swinging out
+    // (not beside the passed vehicle or after, where parked cars are and 1.5 m is contact).
+    const ot = expert.ot?.active;
+    if (ot) this.overtakeEnd = world.t;
+    const left = expert.lateral < 0 && world.t - this.overtakeEnd < 1;
+    const right = expert.lateral > 0 && ot && expert.s < ot.s0 + ot.ramp;
+    if (Math.abs(expert.lateral) > (left || right ? this.maxLateralOvertake : this.maxLateral)) return 'left the lane';
     // Heading of the intended path here, including the swerve of an overtake.
     const p = expert.route.at(expert.s, expert.k), off = expert.ot.offsetAt;
     const pathH = p.h - Math.atan((off(expert.s + 1) - off(expert.s - 1)) / 2);
@@ -153,7 +171,7 @@ export class SafetyDriver {
     const reason = this.enabled ? this.check(world, exp, nn, dt) : null;
     if (reason) {
       this.takeover = TAKEOVER_SECONDS;
-      this.events.push({ t: world.t, reason, x: world.car.x, z: world.car.z, ctx: takeoverContext(world, exp, nn) });
+      this.events.push({ t: world.t, reason, x: world.car.x, z: world.car.z, ctx: takeoverContext(world, exp, nn, this.overtakeEnd) });
       return { ...exp, driver: 'safety', nn, expert: exp, disengaged: reason };
     }
     this.autoDist += d;
