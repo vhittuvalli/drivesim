@@ -10,7 +10,8 @@
 //
 //   node scripts/improve.mjs --rounds 4
 //   node scripts/improve.mjs --rounds 4 --baseline models/bench-fix-49.json   reuse a benchmark of the current model
-//   node scripts/improve.mjs --rounds 4 --remote     fine-tune on a Runpod GPU pod (scripts/remote-train.mjs)
+//   node scripts/improve.mjs --rounds 4 --remote     fine-tune on a Runpod GPU pod (scripts/remote-train.mjs);
+//                                                     the loop ends when the Runpod budget is used up
 //
 // models/loop/ keeps the state between runs: best.json (the best model's benchmark), history.jsonl
 // (one line per round) and history.md (the same as a table). Create models/loop/STOP to end the loop
@@ -162,7 +163,13 @@ async function main() {
     log(`round ${round}: fine-tuning ${opt.epochs} epochs${opt.remote ? ' on Runpod' : ''}`);
     const cand = path.join(dir, 'cand'), trainLog = path.join(dir, 'train.log');
     const trainArgs = ['train/train.py', '--init', MODEL('pt'), '--epochs', opt.epochs, '--out', cand];
-    if (opt.remote && (await run('node', ['scripts/remote-train.mjs', 'train', ...trainArgs.slice(1)], trainLog)) !== 0) {
+    const remote = opt.remote ? await run('node', ['scripts/remote-train.mjs', 'train', ...trainArgs.slice(1)], trainLog) : null;
+    if (remote === 3) { // scripts/remote-train.mjs: the Runpod budget is used up
+      record({ ...entry, error: 'Runpod budget used up' });
+      log(`round ${round}: Runpod budget used up (see ${trainLog}); ending`);
+      break;
+    }
+    if (remote) {
       log(`round ${round}: remote training failed, training on the Mac`);
       fs.rmSync(`${cand}.onnx`, { force: true });
     }

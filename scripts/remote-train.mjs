@@ -12,6 +12,11 @@
 // Needs RUNPOD_API_KEY, RUNPOD_VOLUME (the network volume's id; pods go to its data center) and an
 // SSH key (~/.ssh/id_ed25519, or SSH_KEY=<private key path>). Every pod is deleted when the script
 // ends, and also from the pod itself after --max-hours, should the Mac sleep or the script die.
+//
+// Budget: Runpod spending since RUNPOD_BUDGET_SINCE stays under RUNPOD_BUDGET dollars (default $10
+// since 2026-10-13). A pod is created only if the spend so far plus the expected cost of the run fits;
+// a running pod is deleted when the budget runs out (by this script, and by the pod's own timer).
+// The script then exits with code 3 (improve.mjs ends the loop on it).
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -26,6 +31,10 @@ const FAKE = process.env.RT_FAKE_POD;
 const VOL = FAKE ? `${FAKE}/workspace/drivesim` : '/workspace/drivesim'; // network volume: chunks/, out/, pip cache
 const WORK = FAKE ? `${FAKE}/root` : '/root'; // the pod's own disk
 const NAME = 'drivesim-train'; // every pod this script creates is named this (cleanup relies on it)
+const BUDGET = Number(process.env.RUNPOD_BUDGET ?? 10); // dollars
+const SINCE = process.env.RUNPOD_BUDGET_SINCE ?? '2026-10-13T00:00:00Z';
+const LEDGER = path.join(ROOT, 'models', 'loop', 'runpod-spend.jsonl'); // one line per pod: what it cost
+const OVER_BUDGET = 3; // exit code
 
 const argv = process.argv.slice(2), dash = argv.indexOf('--');
 const { positionals, values: opt } = parseArgs({
@@ -76,14 +85,39 @@ function sh(cmd, { input, quiet } = {}) {
 }
 const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 
+// ---- budget ----
+
+class BudgetError extends Error {}
+const ledger = () => (fs.existsSync(LEDGER) ? fs.readFileSync(LEDGER, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [])
+  .filter((e) => e.date >= SINCE);
+
+// Dollars spent since SINCE: what Runpod has billed, or, when its billing lags behind (it comes in
+// hourly buckets), the pods in the ledger plus billed storage, whichever is more.
+async function spent() {
+  if (FAKE) return ledger().reduce((a, e) => a + e.cost, 0);
+  const t = (await api('GET', `/billing?startTime=${SINCE}&bucketSize=day`)).metadata.totals;
+  const storage = (t.storageStandardAmount ?? 0) + (t.storageHighPerformanceAmount ?? 0);
+  return Math.max(t.totalAmount ?? 0, ledger().reduce((a, e) => a + e.cost, 0) + storage);
+}
+
+// What a run of this kind is expected to cost: the dearest one so far, or a cautious default.
+function expected(kind, price) {
+  const past = ledger().filter((e) => e.kind === kind).map((e) => e.cost);
+  return past.length ? Math.max(...past) : price * (kind === 'gpu' ? 1.5 : 3);
+}
+
 // ---- pods ----
 
-let pod = null; // { id, ssh } of the pod this run created
+let pod = null; // { id, ssh, kind, price, created, spentBefore } of the pod this run created
 const volume = () => api('GET', `/network-volumes/${process.env.RUNPOD_VOLUME ?? die('set RUNPOD_VOLUME')}`);
 function die(m) { throw new Error(m); }
 
 async function createPod(kind) {
-  if (FAKE) return void (pod = { id: 'fake', ssh: 'bash -c' });
+  const price = kind === 'gpu' ? 0.89 : 0.06; // until the pod reports its own
+  const before = await spent(), need = expected(kind, price);
+  log(`Runpod budget: $${before.toFixed(2)} of $${BUDGET} spent since ${SINCE.slice(0, 10)}; this ${kind} run ~$${need.toFixed(2)}`);
+  if (before + need > BUDGET) throw new BudgetError(`budget: $${before.toFixed(2)} spent + ~$${need.toFixed(2)} for this run would pass $${BUDGET}`);
+  if (FAKE) return void (pod = { id: 'fake', ssh: 'bash -c', kind, price, created: Date.now(), spentBefore: before });
   const vol = await volume();
   const pub = fs.readFileSync(SSH_KEY + '.pub', 'utf8').trim();
   const body = {
@@ -97,8 +131,8 @@ async function createPod(kind) {
   for (let attempt = 1; ; attempt++) {
     try {
       const p = await api('POST', '/pods', body);
-      pod = { id: p.id };
-      log(`created ${kind} pod ${p.id} in ${vol.dataCenter} ($${p.cost ?? '?'}/h)`);
+      pod = { id: p.id, kind, price: p.cost || price, created: Date.now(), spentBefore: before };
+      log(`created ${kind} pod ${p.id} in ${vol.dataCenter} ($${pod.price}/h)`);
       break;
     } catch (e) {
       if (attempt >= 5) throw e;
@@ -118,16 +152,27 @@ async function createPod(kind) {
     if (await sh(`${pod.ssh} true`).then(() => true, () => false)) break;
   }
   log(`pod ${pod.id} up`);
-  // The pod deletes itself after --max-hours, whatever happens to this script.
+  // The pod deletes itself after --max-hours or when the budget runs out, whatever happens to this script.
   if (FAKE) return;
-  const secs = Math.round(Number(opt['max-hours']) * 3600);
+  const hours = Math.min(Number(opt['max-hours']), (BUDGET - before) / pod.price) - (Date.now() - pod.created) / 3.6e6;
+  const secs = Math.max(60, Math.round(hours * 3600));
   await sh(`${pod.ssh} ${q(`umask 077; cat > ${WORK}/.rpkey; nohup sh -c 'sleep ${secs}; curl -s -X DELETE -H "Authorization: Bearer $(cat ${WORK}/.rpkey)" ${API}/pods/${pod.id}' < /dev/null >/dev/null 2>&1 &`)}`, { input: KEY, quiet: true });
 }
 
+// Stops the work once this pod has used up what is left of the budget.
+function checkBudget() {
+  if (!pod) return;
+  const cost = ((Date.now() - pod.created) / 3.6e6) * pod.price;
+  if (pod.spentBefore + cost > BUDGET) throw new BudgetError(`budget: $${(pod.spentBefore + cost).toFixed(2)} of $${BUDGET} used; stopping the pod`);
+}
+
 async function deletePod() {
-  if (!pod || FAKE) return;
-  const id = pod.id;
+  if (!pod) return;
+  const { id, kind, price, created } = pod, hours = (Date.now() - created) / 3.6e6;
   pod = null;
+  if (created) fs.mkdirSync(path.dirname(LEDGER), { recursive: true });
+  if (created) fs.appendFileSync(LEDGER, JSON.stringify({ date: new Date(created).toISOString(), pod: id, kind, price, hours: +hours.toFixed(3), cost: +(hours * price).toFixed(3) }) + '\n');
+  if (FAKE) return;
   for (let i = 0; i < 3; i++) {
     await api('DELETE', `/pods/${id}`).catch(() => {});
     if (!(await api('GET', `/pods/${id}`).then((p) => p && p.status !== 'TERMINATED', () => false))) return log(`deleted pod ${id}`);
@@ -188,6 +233,7 @@ async function sync() {
         }
       }
       done++;
+      checkBudget();
       log(`chunk ${done}/${chunks.length} · ${(sent / 1e9).toFixed(2)} GB · ${(sent / 1e6 / ((Date.now() - t0) / 1000)).toFixed(1)} MB/s`);
     }
   }));
@@ -217,6 +263,7 @@ async function train() {
     await start(resume);
     for (;;) {
       await sleep(FAKE ? 5000 : 60_000);
+      checkBudget();
       const st = await sh(`${pod.ssh} ${q(`cat ${outR}.exit 2>/dev/null; echo ---; tail -n +${shown + 1} ${outR}.log`)}`).catch(() => null);
       if (st == null) continue; // SSH hiccup: the training goes on
       const [code, newLines] = st.split('---\n');
@@ -266,7 +313,7 @@ try {
   else throw new Error('usage: node scripts/remote-train.mjs sync|train|cleanup [options]');
 } catch (e) {
   log('ERROR', e.message);
-  process.exitCode = 1;
+  process.exitCode = e instanceof BudgetError ? OVER_BUDGET : 1;
 } finally {
   await deletePod().catch((e) => log('ERROR deleting the pod:', e.message));
 }
