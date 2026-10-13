@@ -276,7 +276,7 @@ async function train() {
   await sh(`tar cf - -C ${q(path.resolve(opt.code))} train | ${pod.ssh} ${q(`rm -rf ${WORK}/drivesim && mkdir -p ${WORK}/drivesim && tar xf - -C ${WORK}/drivesim`)}`);
   if (opt.init) await sh(`${pod.ssh} ${q(`cat > ${WORK}/init.pt`)} < ${q(opt.init)}`);
   log('unpacking the data on the pod');
-  await sh(`${pod.ssh} ${q(`mkdir -p ${WORK}/data && for t in $(ls ${VOL}/chunks/*.tar | sort); do tar xf "$t" -C ${WORK}/data; done${FAKE ? '' : ` && pip install -q --cache-dir ${VOL}/pip onnx onnxruntime 2>&1 | tail -2`}`)}`);
+  await sh(`${pod.ssh} ${q(`mkdir -p ${WORK}/data && for t in $(ls ${VOL}/chunks/*.tar | sort); do tar xf "$t" -C ${WORK}/data; done${FAKE ? '' : ` && python -m pip install -q --cache-dir ${VOL}/pip onnx onnxruntime 2>&1 | tail -2`}`)}`);
   const args = ['train/train.py', '--device', FAKE ? 'auto' : 'cuda', '--data', `${WORK}/data`, '--epochs', opt.epochs, '--out', outR, '--workers', opt.workers,
     ...(opt.init ? ['--init', `${WORK}/init.pt`] : []), ...extra];
   // Training runs detached on the pod (a dropped SSH connection doesn't stop it); this polls its log.
