@@ -144,7 +144,7 @@ async function createPod(kind) {
       bench: { cpu: { id: opt.cpu, vcpuCount: Number(opt.vcpus) }, disk: 20 },
     }[kind],
   };
-  // Stock comes and goes: a few tries before giving up. A bench pod names the data centers that
+  // Stock comes and goes: tries for half an hour (5 min for the upload pod). A bench pod names the data centers that
   // have its CPU type at its size right now (without them the create doesn't look everywhere).
   for (let attempt = 1; ; attempt++) {
     try {
@@ -160,7 +160,7 @@ async function createPod(kind) {
       log(`created ${kind} pod ${p.id} in ${p.dataCenterId ?? vol.dataCenter} ($${pod.price}/h)`);
       break;
     } catch (e) {
-      if (attempt >= 5) throw e;
+      if (attempt >= (kind === 'cpu' ? 5 : 30)) throw e; // a failed create costs nothing
       log(`pod create failed (${e.message.slice(0, 160)}); retrying in 60 s`);
       await sleep(60_000);
     }
