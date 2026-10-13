@@ -61,7 +61,7 @@ const { positionals, values: opt } = parseArgs({
     seeds: { type: 'string', default: '1,2,3,4,5,6,7,8,9' },
     trials: { type: 'string', default: '2' },
     cities: { type: 'string', default: '9' }, // bench: browsers per job at once
-    cpu: { type: 'string', default: 'cpu5c' }, // bench pod
+    cpu: { type: 'string', default: 'cpu3c' }, // bench pod: the CPU type in stock in most places
     vcpus: { type: 'string', default: '16' },
   },
 });
@@ -126,8 +126,8 @@ const volume = () => api('GET', `/network-volumes/${process.env.RUNPOD_VOLUME ??
 function die(m) { throw new Error(m); }
 
 async function createPod(kind) {
-  // Until the pod reports its own price; Secure Cloud, from the catalog (cpu5c is $0.035 per vCPU).
-  const price = { gpu: 0.89, cpu: 0.06, bench: 0.035 * Number(opt.vcpus) }[kind];
+  // Until the pod reports its own price; Secure Cloud, from the catalog (cpu3c is $0.03 per vCPU).
+  const price = { gpu: 0.89, cpu: 0.06, bench: 0.03 * Number(opt.vcpus) }[kind];
   const before = await spent(), need = expected(kind, price);
   log(`Runpod budget: $${before.toFixed(2)} of $${BUDGET} spent since ${SINCE.slice(0, 10)}; this ${kind} run ~$${need.toFixed(2)}`);
   if (before + need > BUDGET) throw new BudgetError(`budget: $${before.toFixed(2)} spent + ~$${need.toFixed(2)} for this run would pass $${BUDGET}`);
