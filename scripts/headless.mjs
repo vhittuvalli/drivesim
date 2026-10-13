@@ -20,6 +20,10 @@ const CHROMES = [
   '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser',
 ];
 const STALL_S = 120; // give up on a browser whose simulation clock hasn't moved for this long
+// ... or that hasn't started it this long after loading. Building a city without a GPU (SwiftShader,
+// several browsers at once) takes minutes: LOAD_S=<seconds> raises it, STAGGER_S=<seconds> spaces
+// the browsers' starts so they don't all build at once.
+const LOAD_S = Number(process.env.LOAD_S ?? 120), STAGGER_S = Number(process.env.STAGGER_S ?? 0);
 
 const { positionals, values: opt } = parseArgs({
   allowPositionals: true,
@@ -89,7 +93,7 @@ async function watch({ page, tag }, done, describe) {
     st = await page.evaluate(() => window.__status?.() ?? null).catch(() => null);
     const t = st?.t ?? null;
     if (t !== lastT) (lastT = t), (since = Date.now());
-    else if (Date.now() - since > STALL_S * 1000) {
+    else if (Date.now() - since > (t == null ? LOAD_S : STALL_S) * 1000) {
       console.log(tag, `stalled at sim t=${t}; giving up`);
       return { ...(st ?? {}), stalled: true };
     }
@@ -171,7 +175,8 @@ async function bench() {
   // A city that fails twice (e.g. the network dropped while loading) is reported and left out;
   // the cities that finished are still written.
   const runs = [], failed = [], queue = [...seeds];
-  await Promise.all(Array.from({ length: Math.min(Number(opt.parallel), seeds.length) }, async () => {
+  await Promise.all(Array.from({ length: Math.min(Number(opt.parallel), seeds.length) }, async (_, i) => {
+    await sleep(i * STAGGER_S * 1000);
     while (queue.length) {
       const seed = queue.shift(), r = await runOne(seed);
       if (r) runs.push(r);
