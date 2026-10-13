@@ -10,7 +10,8 @@
 //   node scripts/remote-train.mjs cleanup                   delete pods this script left behind
 //
 // Needs RUNPOD_API_KEY, RUNPOD_VOLUME (the network volume's id; pods go to its data center) and an
-// SSH key (~/.ssh/id_ed25519, or SSH_KEY=<private key path>). Every pod is deleted when the script
+// SSH key without a passphrase (~/.ssh/drivesim_runpod, made with ssh-keygen -t ed25519 -N "", or
+// SSH_KEY=<private key path>). Every pod is deleted when the script
 // ends, and also from the pod itself after --max-hours, should the Mac sleep or the script die.
 //
 // Budget: Runpod spending since RUNPOD_BUDGET_SINCE stays under RUNPOD_BUDGET dollars (default $10
@@ -59,7 +60,9 @@ const extra = dash < 0 ? [] : argv.slice(dash + 1);
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const KEY = process.env.RUNPOD_API_KEY ?? (FAKE && 'fake');
-const SSH_KEY = process.env.SSH_KEY ?? path.join(os.homedir(), '.ssh', 'id_ed25519');
+// A key without a passphrase, for these throwaway pods only: the script logs in unattended, and an
+// ssh-agent holding a protected key is empty again after the Mac restarts.
+const SSH_KEY = process.env.SSH_KEY ?? path.join(os.homedir(), '.ssh', 'drivesim_runpod');
 if (!KEY) throw new Error('set RUNPOD_API_KEY');
 
 async function api(method, p, body) {
