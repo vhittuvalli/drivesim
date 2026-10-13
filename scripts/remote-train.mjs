@@ -347,8 +347,9 @@ CH=$(ls ${T}/chrome/chrome-headless-shell/*/chrome-headless-shell-linux64/chrome
       await sh(`${pod.ssh} ${q(`cat > ${dir}/${dst}`)} < ${q(src)}`);
     const outR = `${B}/${j.name}-${stamp}`;
     j.outR = outR;
+    // The dev server and the benchmark start in ( ... &): no shell on the pod keeps this SSH connection open.
     const run = `node scripts/headless.mjs bench --seeds ${opt.seeds} --trials ${opt.trials} --parallel ${opt.cities} --base http://localhost:${j.port} --out ${outR}.json`;
-    await sh(`${pod.ssh} ${q(`cd ${dir} && export PATH=${T}/node/bin:$PATH CHROME=$(ls ${T}/chrome/chrome-headless-shell/*/chrome-headless-shell-linux64/chrome-headless-shell) VIEWPORT=640x360 && (nohup python3 scripts/serve.py ${j.port} > serve.log 2>&1 < /dev/null &) && sleep 1 && nohup sh -c ${q(`${run} > ${outR}.log 2>&1; echo $? > ${outR}.exit`)} < /dev/null > /dev/null 2>&1 &`)}`);
+    await sh(`${pod.ssh} ${q(`cd ${dir} && export PATH=${T}/node/bin:$PATH CHROME=$(ls ${T}/chrome/chrome-headless-shell/*/chrome-headless-shell-linux64/chrome-headless-shell) VIEWPORT=640x360 && (nohup python3 scripts/serve.py ${j.port} > serve.log 2>&1 < /dev/null &) && sleep 1 && (nohup sh -c ${q(`${run} > ${outR}.log 2>&1; echo $? > ${outR}.exit`)} < /dev/null > /dev/null 2>&1 &)`)}`);
   }
   // Poll: finished cities and errors as they come, each city's progress every 10 minutes.
   const shown = Object.fromEntries(jobs.map((j) => [j.name, 0])), progress = {};
