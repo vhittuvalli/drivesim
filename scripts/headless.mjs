@@ -45,6 +45,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const chrome = process.env.CHROME ?? CHROMES.find((c) => fs.existsSync(c));
 if (!chrome) throw new Error('Chrome not found: set CHROME=/path/to/chrome');
 
+// Metal on the Mac; on Linux (a Runpod CPU pod, as root) WebGL runs on SwiftShader, the CPU renderer.
+// CHROME_ARGS (space-separated) replaces either. The cameras the driver sees render to fixed-size
+// targets, so VIEWPORT=<w>x<h> (a smaller main view, cheaper without a GPU) doesn't change them.
+const CHROME_ARGS = process.env.CHROME_ARGS?.split(' ') ?? (process.platform === 'linux'
+  ? ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--no-sandbox', '--mute-audio']
+  : ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist', '--mute-audio']);
+const [VIEW_W, VIEW_H] = (process.env.VIEWPORT ?? '1280x720').split('x').map(Number);
+
 // A fresh browser on the app. A page that times out loading (dev server or GPU busy) gets a new
 // browser and another try, up to LOAD_TRIES, instead of failing the whole collection or benchmark.
 const LOAD_TRIES = 4;
@@ -54,8 +62,8 @@ async function open(query) {
     const browser = await puppeteer.launch({
       executablePath: chrome,
       headless: true,
-      args: ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist', '--mute-audio'],
-      defaultViewport: { width: 1280, height: 720 },
+      args: CHROME_ARGS,
+      defaultViewport: { width: VIEW_W, height: VIEW_H },
     });
     try {
       const page = await browser.newPage();
