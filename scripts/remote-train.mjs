@@ -144,9 +144,17 @@ async function createPod(kind) {
       bench: { cpu: { id: opt.cpu, vcpuCount: Number(opt.vcpus) }, disk: 30 },
     }[kind],
   };
-  // Stock comes and goes: a few tries before giving up.
+  // Stock comes and goes: a few tries before giving up. A bench pod names the data centers that
+  // have its CPU type at its size right now (without them the create doesn't look everywhere).
   for (let attempt = 1; ; attempt++) {
     try {
+      if (kind === 'bench') {
+        const cat = await api('GET', `/catalog/cpus?include=AVAILABILITY&product=POD&vcpuCount=${opt.vcpus}`);
+        const rank = { HIGH: 0, MEDIUM: 1, LOW: 2 };
+        body.dataCenterIds = (cat.cpus.find((c) => c.id === opt.cpu)?.dataCenters ?? [])
+          .sort((a, b) => rank[a.availability] - rank[b.availability]).map((d) => d.id);
+        if (!body.dataCenterIds.length) throw new Error(`no ${opt.cpu} with ${opt.vcpus} vCPUs in stock anywhere`);
+      }
       const p = await api('POST', '/pods', body);
       pod = { id: p.id, kind, price: p.cost || price, created: Date.now(), spentBefore: before };
       log(`created ${kind} pod ${p.id} in ${p.dataCenterId ?? vol.dataCenter} ($${pod.price}/h)`);
