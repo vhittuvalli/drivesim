@@ -62,7 +62,7 @@ const { positionals, values: opt } = parseArgs({
     trials: { type: 'string', default: '2' },
     cities: { type: 'string', default: '9' }, // bench: browsers per job at once
     cpu: { type: 'string', default: 'cpu5c' }, // bench pod
-    vcpus: { type: 'string', default: '32' },
+    vcpus: { type: 'string', default: '16' },
   },
 });
 const extra = dash < 0 ? [] : argv.slice(dash + 1);
@@ -134,9 +134,10 @@ async function createPod(kind) {
   if (FAKE) return void (pod = { id: 'fake', ssh: 'bash -c', kind, price, created: Date.now(), spentBefore: before });
   const vol = await volume();
   const pub = fs.readFileSync(SSH_KEY + '.pub', 'utf8').trim();
+  // A bench pod needs no data, so it skips the volume and can go wherever its CPU type is in stock.
   const body = {
-    name: NAME, image: opt.image, cloud: 'SECURE', dataCenterIds: [vol.dataCenter], ports: ['22/tcp'],
-    mounts: { network: [{ volumeId: vol.id, path: '/workspace' }] }, env: { PUBLIC_KEY: pub },
+    name: NAME, image: opt.image, cloud: 'SECURE', ports: ['22/tcp'], env: { PUBLIC_KEY: pub },
+    ...(kind === 'bench' ? {} : { dataCenterIds: [vol.dataCenter], mounts: { network: [{ volumeId: vol.id, path: '/workspace' }] } }),
     ...{
       gpu: { gpu: { id: opt.gpu, count: 1, minCudaVersion: '12.8', minVcpuCountPerGpu: 8 }, disk: 120 },
       cpu: { cpu: { id: 'cpu3c', vcpuCount: 2 }, disk: 20 },
@@ -148,7 +149,7 @@ async function createPod(kind) {
     try {
       const p = await api('POST', '/pods', body);
       pod = { id: p.id, kind, price: p.cost || price, created: Date.now(), spentBefore: before };
-      log(`created ${kind} pod ${p.id} in ${vol.dataCenter} ($${pod.price}/h)`);
+      log(`created ${kind} pod ${p.id} in ${p.dataCenterId ?? vol.dataCenter} ($${pod.price}/h)`);
       break;
     } catch (e) {
       if (attempt >= 5) throw e;
@@ -301,10 +302,11 @@ async function train() {
 
 // Each --job <out>=<rev>:<model> benchmarks the app as of git revision <rev> (its src/, so its
 // scenarios and safety driver) driven by <model>.onnx/.json, with this checkout's headless.mjs.
-// All jobs run at once on one CPU pod; WebGL runs on SwiftShader. The sim steps a fixed clock and
+// All jobs run at once on one CPU pod (no volume: it goes wherever --cpu is in stock); WebGL runs on
+// SwiftShader. The sim steps a fixed clock and
 // waits for every camera frame and model answer, so a slower machine changes the time a benchmark
 // takes, not its result. Rendering does differ from the Mac's, so compare pod results with pod
-// results only. Node and Chrome are cached on the volume after the first run.
+// results only, and from the same --cpu type.
 const NODE = 'v22.20.0', CHROME = '131.0.6778.204'; // CHROME: the one puppeteer-core 23.11 is made for
 const CHROME_DEPS = 'libnss3 libnspr4 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2t64 libpango-1.0-0 libcairo2 libdbus-1-3 libexpat1 libxext6 libx11-6 libxcb1 fonts-liberation';
 
@@ -317,9 +319,9 @@ async function bench() {
   if (!jobs.length) die('bench needs at least one --job');
   for (const j of jobs) j.commit = (await sh(`git -C ${q(ROOT)} rev-parse --short ${q(j.rev)}`)).trim();
   await createPod('bench');
-  const T = `${VOL}/tools`, B = `${WORK}/bench`, stamp = Date.now().toString(36);
+  const T = `${WORK}/tools`, B = `${WORK}/bench`, stamp = Date.now().toString(36);
   log('installing Node and Chrome on the pod');
-  await sh(`${pod.ssh} ${q(`set -e; mkdir -p ${T} ${B} ${VOL}/out && cd ${T}
+  await sh(`${pod.ssh} ${q(`set -e; mkdir -p ${T} ${B} && cd ${T}
 [ -x node/bin/node ] || { curl -fsSL https://nodejs.org/dist/${NODE}/node-${NODE}-linux-x64.tar.gz | tar xz && mv node-${NODE}-linux-x64 node; }
 export PATH=${T}/node/bin:$PATH
 [ -d node_modules/puppeteer-core ] || npm install -s --no-audit --no-fund puppeteer-core@23.11.1 @puppeteer/browsers@2.6.1
@@ -333,7 +335,7 @@ CH=$(ls ${T}/chrome/chrome-headless-shell/*/chrome-headless-shell-linux64/chrome
     await sh(`git -C ${q(ROOT)} archive ${j.commit} index.html style.css src assets scripts models | ${pod.ssh} ${q(`rm -rf ${dir} && mkdir -p ${dir} && tar xf - -C ${dir} && ln -s ${T}/node_modules ${dir}/node_modules`)}`);
     for (const [src, dst] of [[`${j.model}.onnx`, 'models/policy.onnx'], [`${j.model}.json`, 'models/policy.json'], [path.join(ROOT, 'scripts/headless.mjs'), 'scripts/headless.mjs']])
       await sh(`${pod.ssh} ${q(`cat > ${dir}/${dst}`)} < ${q(src)}`);
-    const outR = `${VOL}/out/bench-${j.name}-${stamp}`;
+    const outR = `${B}/${j.name}-${stamp}`;
     j.outR = outR;
     const run = `node scripts/headless.mjs bench --seeds ${opt.seeds} --trials ${opt.trials} --parallel ${opt.cities} --base http://localhost:${j.port} --out ${outR}.json`;
     await sh(`${pod.ssh} ${q(`cd ${dir} && export PATH=${T}/node/bin:$PATH CHROME=$(ls ${T}/chrome/chrome-headless-shell/*/chrome-headless-shell-linux64/chrome-headless-shell) VIEWPORT=640x360 && (nohup python3 scripts/serve.py ${j.port} > serve.log 2>&1 < /dev/null &) && sleep 1 && nohup sh -c ${q(`${run} > ${outR}.log 2>&1; echo $? > ${outR}.exit`)} < /dev/null > /dev/null 2>&1 &`)}`);
