@@ -141,7 +141,7 @@ async function createPod(kind) {
     ...{
       gpu: { gpu: { id: opt.gpu, count: 1, minCudaVersion: '12.8', minVcpuCountPerGpu: 8 }, disk: 120 },
       cpu: { cpu: { id: 'cpu3c', vcpuCount: 2 }, disk: 20 },
-      bench: { cpu: { id: opt.cpu, vcpuCount: Number(opt.vcpus) }, disk: 30 },
+      bench: { cpu: { id: opt.cpu, vcpuCount: Number(opt.vcpus) }, disk: 20 },
     }[kind],
   };
   // Stock comes and goes: a few tries before giving up. A bench pod names the data centers that
