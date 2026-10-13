@@ -95,7 +95,7 @@ const ledger = () => (fs.existsSync(LEDGER) ? fs.readFileSync(LEDGER, 'utf8').tr
 // hourly buckets), the pods in the ledger plus billed storage, whichever is more.
 async function spent() {
   if (FAKE) return ledger().reduce((a, e) => a + e.cost, 0);
-  const t = (await api('GET', `/billing?startTime=${SINCE}&bucketSize=day`)).metadata.totals;
+  const t = (await api('GET', `/billing?startTime=${SINCE}&endTime=${new Date(Date.now() + 86400e3).toISOString().slice(0, 10)}T00:00:00Z&bucketSize=day`)).metadata.totals;
   const storage = (t.storageStandardAmount ?? 0) + (t.storageHighPerformanceAmount ?? 0);
   return Math.max(t.totalAmount ?? 0, ledger().reduce((a, e) => a + e.cost, 0) + storage);
 }
