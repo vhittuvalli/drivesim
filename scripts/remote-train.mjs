@@ -1,5 +1,5 @@
-// Train on a Runpod GPU pod instead of the Mac; collection and benchmarks stay local (they need the
-// browser sim). The data lives on a Runpod network volume as tar chunks (1.5M small files would be
+// Train on a Runpod GPU pod instead of the Mac, and benchmark on a Runpod CPU pod; collection stays
+// local (it streams frames into data/ through the dev server). The data lives on a Runpod network volume as tar chunks (1.5M small files would be
 // slow to read off network storage); each training run gets a fresh pod that unpacks them to its
 // local disk, trains with --device cuda, writes its outputs to the volume, and is deleted. Only runs
 // that are new (or have changed) since the last sync are uploaded.
@@ -7,6 +7,9 @@
 //   node scripts/remote-train.mjs sync                      upload new runs from a cheap CPU pod
 //   node scripts/remote-train.mjs train --init models/policy.pt --epochs 3 --out /tmp/cand
 //   node scripts/remote-train.mjs train ... -- --encoder mobilenet     extra train.py arguments
+//   node scripts/remote-train.mjs train --code ../drivesim ...   train.py from another checkout
+//   node scripts/remote-train.mjs bench --job models/bench-x.json=<git rev>:models/policy ...
+//                                                           benchmark models on a CPU pod, see bench()
 //   node scripts/remote-train.mjs cleanup                   delete pods this script left behind
 //
 // Needs RUNPOD_API_KEY, RUNPOD_VOLUME (the network volume's id; pods go to its data center) and an
@@ -53,6 +56,13 @@ const { positionals, values: opt } = parseArgs({
     parallel: { type: 'string', default: '4' }, // upload streams
     chunk: { type: 'string', default: '48' }, // runs per uploaded tar
     data: { type: 'string', default: path.join(ROOT, 'data') },
+    code: { type: 'string', default: ROOT }, // checkout whose train/ the pod runs
+    job: { type: 'string', multiple: true }, // bench: <out .json>=<git rev>:<model path without .onnx>
+    seeds: { type: 'string', default: '1,2,3,4,5,6,7,8,9' },
+    trials: { type: 'string', default: '2' },
+    cities: { type: 'string', default: '9' }, // bench: browsers per job at once
+    cpu: { type: 'string', default: 'cpu5c' }, // bench pod
+    vcpus: { type: 'string', default: '32' },
   },
 });
 const extra = dash < 0 ? [] : argv.slice(dash + 1);
@@ -106,7 +116,7 @@ async function spent() {
 // What a run of this kind is expected to cost: the dearest one so far, or a cautious default.
 function expected(kind, price) {
   const past = ledger().filter((e) => e.kind === kind).map((e) => e.cost);
-  return past.length ? Math.max(...past) : price * (kind === 'gpu' ? 1.5 : 3);
+  return past.length ? Math.max(...past) : price * (kind === 'gpu' ? 1.5 : 3); // bench: 3 h
 }
 
 // ---- pods ----
@@ -116,7 +126,8 @@ const volume = () => api('GET', `/network-volumes/${process.env.RUNPOD_VOLUME ??
 function die(m) { throw new Error(m); }
 
 async function createPod(kind) {
-  const price = kind === 'gpu' ? 0.89 : 0.06; // until the pod reports its own
+  // Until the pod reports its own price; Secure Cloud, from the catalog (cpu5c is $0.035 per vCPU).
+  const price = { gpu: 0.89, cpu: 0.06, bench: 0.035 * Number(opt.vcpus) }[kind];
   const before = await spent(), need = expected(kind, price);
   log(`Runpod budget: $${before.toFixed(2)} of $${BUDGET} spent since ${SINCE.slice(0, 10)}; this ${kind} run ~$${need.toFixed(2)}`);
   if (before + need > BUDGET) throw new BudgetError(`budget: $${before.toFixed(2)} spent + ~$${need.toFixed(2)} for this run would pass $${BUDGET}`);
@@ -126,9 +137,11 @@ async function createPod(kind) {
   const body = {
     name: NAME, image: opt.image, cloud: 'SECURE', dataCenterIds: [vol.dataCenter], ports: ['22/tcp'],
     mounts: { network: [{ volumeId: vol.id, path: '/workspace' }] }, env: { PUBLIC_KEY: pub },
-    ...(kind === 'gpu'
-      ? { gpu: { id: opt.gpu, count: 1, minCudaVersion: '12.8', minVcpuCountPerGpu: 8 }, disk: 120 }
-      : { cpu: { id: 'cpu3c', vcpuCount: 2 }, disk: 20 }),
+    ...{
+      gpu: { gpu: { id: opt.gpu, count: 1, minCudaVersion: '12.8', minVcpuCountPerGpu: 8 }, disk: 120 },
+      cpu: { cpu: { id: 'cpu3c', vcpuCount: 2 }, disk: 20 },
+      bench: { cpu: { id: opt.cpu, vcpuCount: Number(opt.vcpus) }, disk: 30 },
+    }[kind],
   };
   // Stock comes and goes: a few tries before giving up.
   for (let attempt = 1; ; attempt++) {
@@ -249,7 +262,7 @@ async function train() {
   if (!opt.out) throw new Error('--out <path without extension> is required');
   const name = `${path.basename(opt.out)}-${Date.now().toString(36)}`, outR = `${VOL}/out/${name}`;
   // Code and the starting checkpoint go to the pod's own disk.
-  await sh(`tar cf - -C ${q(ROOT)} train | ${pod.ssh} ${q(`rm -rf ${WORK}/drivesim && mkdir -p ${WORK}/drivesim && tar xf - -C ${WORK}/drivesim`)}`);
+  await sh(`tar cf - -C ${q(path.resolve(opt.code))} train | ${pod.ssh} ${q(`rm -rf ${WORK}/drivesim && mkdir -p ${WORK}/drivesim && tar xf - -C ${WORK}/drivesim`)}`);
   if (opt.init) await sh(`${pod.ssh} ${q(`cat > ${WORK}/init.pt`)} < ${q(opt.init)}`);
   log('unpacking the data on the pod');
   await sh(`${pod.ssh} ${q(`mkdir -p ${WORK}/data && for t in $(ls ${VOL}/chunks/*.tar | sort); do tar xf "$t" -C ${WORK}/data; done${FAKE ? '' : ` && pip install -q --cache-dir ${VOL}/pip onnx onnxruntime 2>&1 | tail -2`}`)}`);
@@ -284,6 +297,80 @@ async function train() {
   log(`wrote ${opt.out}.onnx, .json and .pt`);
 }
 
+// ---- benchmarks ----
+
+// Each --job <out>=<rev>:<model> benchmarks the app as of git revision <rev> (its src/, so its
+// scenarios and safety driver) driven by <model>.onnx/.json, with this checkout's headless.mjs.
+// All jobs run at once on one CPU pod; WebGL runs on SwiftShader. The sim steps a fixed clock and
+// waits for every camera frame and model answer, so a slower machine changes the time a benchmark
+// takes, not its result. Rendering does differ from the Mac's, so compare pod results with pod
+// results only. Node and Chrome are cached on the volume after the first run.
+const NODE = 'v22.20.0', CHROME = '131.0.6778.204'; // CHROME: the one puppeteer-core 23.11 is made for
+const CHROME_DEPS = 'libnss3 libnspr4 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2t64 libpango-1.0-0 libcairo2 libdbus-1-3 libexpat1 libxext6 libx11-6 libxcb1 fonts-liberation';
+
+async function bench() {
+  const jobs = (opt.job ?? []).map((j, i) => {
+    const m = j.match(/^([^=]+)=([^:]+):(.+)$/) ?? die(`--job ${j}: expected <out .json>=<git rev>:<model without .onnx>`);
+    for (const ext of ['onnx', 'json']) if (!fs.existsSync(`${m[3]}.${ext}`)) die(`--job ${j}: no ${m[3]}.${ext}`);
+    return { out: m[1], rev: m[2], model: m[3], name: `job${i}`, port: 8100 + i };
+  });
+  if (!jobs.length) die('bench needs at least one --job');
+  for (const j of jobs) j.commit = (await sh(`git -C ${q(ROOT)} rev-parse --short ${q(j.rev)}`)).trim();
+  await createPod('bench');
+  const T = `${VOL}/tools`, B = `${WORK}/bench`, stamp = Date.now().toString(36);
+  log('installing Node and Chrome on the pod');
+  await sh(`${pod.ssh} ${q(`set -e; mkdir -p ${T} ${B} ${VOL}/out && cd ${T}
+[ -x node/bin/node ] || { curl -fsSL https://nodejs.org/dist/${NODE}/node-${NODE}-linux-x64.tar.gz | tar xz && mv node-${NODE}-linux-x64 node; }
+export PATH=${T}/node/bin:$PATH
+[ -d node_modules/puppeteer-core ] || npm install -s --no-audit --no-fund puppeteer-core@23.11.1 @puppeteer/browsers@2.6.1
+[ -d chrome ] || npx -y @puppeteer/browsers install chrome-headless-shell@${CHROME} --path ${T}/chrome > /dev/null
+apt-get -qq update > /dev/null && DEBIAN_FRONTEND=noninteractive apt-get -qq install -y ${CHROME_DEPS} > /dev/null
+CH=$(ls ${T}/chrome/chrome-headless-shell/*/chrome-headless-shell-linux64/chrome-headless-shell)
+! ldd $CH | grep 'not found'`)}`);
+  for (const j of jobs) {
+    log(`${j.name}: ${j.rev} (${j.commit}) with ${j.model} -> ${j.out}`);
+    const dir = `${B}/${j.name}`;
+    await sh(`git -C ${q(ROOT)} archive ${j.commit} index.html style.css src assets scripts models | ${pod.ssh} ${q(`rm -rf ${dir} && mkdir -p ${dir} && tar xf - -C ${dir} && ln -s ${T}/node_modules ${dir}/node_modules`)}`);
+    for (const [src, dst] of [[`${j.model}.onnx`, 'models/policy.onnx'], [`${j.model}.json`, 'models/policy.json'], [path.join(ROOT, 'scripts/headless.mjs'), 'scripts/headless.mjs']])
+      await sh(`${pod.ssh} ${q(`cat > ${dir}/${dst}`)} < ${q(src)}`);
+    const outR = `${VOL}/out/bench-${j.name}-${stamp}`;
+    j.outR = outR;
+    const run = `node scripts/headless.mjs bench --seeds ${opt.seeds} --trials ${opt.trials} --parallel ${opt.cities} --base http://localhost:${j.port} --out ${outR}.json`;
+    await sh(`${pod.ssh} ${q(`cd ${dir} && export PATH=${T}/node/bin:$PATH CHROME=$(ls ${T}/chrome/chrome-headless-shell/*/chrome-headless-shell-linux64/chrome-headless-shell) VIEWPORT=640x360 && (nohup python3 scripts/serve.py ${j.port} > serve.log 2>&1 < /dev/null &) && sleep 1 && nohup sh -c ${q(`${run} > ${outR}.log 2>&1; echo $? > ${outR}.exit`)} < /dev/null > /dev/null 2>&1 &`)}`);
+  }
+  // Poll: finished cities and errors as they come, each city's progress every 10 minutes.
+  const shown = Object.fromEntries(jobs.map((j) => [j.name, 0])), progress = {};
+  let lastReport = Date.now(), left = [...jobs];
+  while (left.length) {
+    await sleep(60_000);
+    checkBudget();
+    for (const j of [...left]) {
+      const st = await sh(`${pod.ssh} ${q(`cat ${j.outR}.exit 2>/dev/null; echo ---; tail -n +${shown[j.name] + 1} ${j.outR}.log`)}`).catch(() => null);
+      if (st == null) continue;
+      const [code, newLines] = st.split('---\n');
+      if (newLines) {
+        fs.appendFileSync(`${j.out}.remote.log`, newLines);
+        shown[j.name] += newLines.split('\n').length - 1;
+        for (const l of newLines.split('\n')) {
+          const m = l.match(/^\[(\d+)\] benchmark (\S+)/);
+          if (m) progress[`${j.name} city ${m[1]}`] = m[2] + l.slice(l.lastIndexOf('·'));
+          else if (/^seed \d|^wrote|left out|did not|stalled|lost|error|Error/.test(l)) log(`  ${j.name} ${l.slice(0, 200)}`);
+        }
+      }
+      if (code.trim()) {
+        if (code.trim() !== '0') throw new Error(`${j.name} failed on the pod (exit ${code.trim()}); log in ${j.out}.remote.log`);
+        await sh(`${pod.ssh} ${q(`cat ${j.outR}.json`)} > ${q(j.out)}`);
+        log(`${j.name} done: wrote ${j.out}`);
+        left = left.filter((x) => x !== j);
+      }
+    }
+    if (Date.now() - lastReport > 600_000 && left.length) {
+      log('progress: ' + Object.entries(progress).map(([k, v]) => `${k} ${v}`).join(' | '));
+      lastReport = Date.now();
+    }
+  }
+}
+
 // ---- main ----
 
 async function cleanup() {
@@ -312,8 +399,9 @@ try {
     await createPod('gpu');
     await sync();
     await train();
-  } else if (cmd === 'cleanup') await cleanup();
-  else throw new Error('usage: node scripts/remote-train.mjs sync|train|cleanup [options]');
+  } else if (cmd === 'bench') await bench();
+  else if (cmd === 'cleanup') await cleanup();
+  else throw new Error('usage: node scripts/remote-train.mjs sync|train|bench|cleanup [options]');
 } catch (e) {
   log('ERROR', e.message);
   process.exitCode = e instanceof BudgetError ? OVER_BUDGET : 1;
