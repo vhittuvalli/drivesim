@@ -45,19 +45,31 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const chrome = process.env.CHROME ?? CHROMES.find((c) => fs.existsSync(c));
 if (!chrome) throw new Error('Chrome not found: set CHROME=/path/to/chrome');
 
+// A fresh browser on the app. A page that times out loading (dev server or GPU busy) gets a new
+// browser and another try, up to LOAD_TRIES, instead of failing the whole collection or benchmark.
+const LOAD_TRIES = 4;
 async function open(query) {
-  const browser = await puppeteer.launch({
-    executablePath: chrome,
-    headless: true,
-    args: ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist', '--mute-audio'],
-    defaultViewport: { width: 1280, height: 720 },
-  });
-  const page = await browser.newPage();
   const tag = `[${query.match(/seed=(\d+)/)?.[1] ?? '?'}]`;
-  page.on('pageerror', (e) => console.log(tag, 'page error:', e.message));
-  page.on('console', (m) => m.type() === 'error' && !m.text().includes('404') && console.log(tag, m.text()));
-  await page.goto(`${opt.base}/?${query}`);
-  return { browser, page, tag };
+  for (let attempt = 1; ; attempt++) {
+    const browser = await puppeteer.launch({
+      executablePath: chrome,
+      headless: true,
+      args: ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist', '--mute-audio'],
+      defaultViewport: { width: 1280, height: 720 },
+    });
+    try {
+      const page = await browser.newPage();
+      page.on('pageerror', (e) => console.log(tag, 'page error:', e.message));
+      page.on('console', (m) => m.type() === 'error' && !m.text().includes('404') && console.log(tag, m.text()));
+      await page.goto(`${opt.base}/?${query}`, { timeout: 60_000 });
+      return { browser, page, tag };
+    } catch (e) {
+      await browser.close().catch(() => {});
+      if (attempt >= LOAD_TRIES) throw e;
+      console.log(tag, `page did not load (${e.message}); new browser in 10 s (try ${attempt + 1}/${LOAD_TRIES})`);
+      await sleep(10_000);
+    }
+  }
 }
 
 // Poll window.__status() until done(status), the GPU context is lost, or the clock stalls; returns
@@ -130,7 +142,13 @@ async function bench() {
   const seeds = (process.argv.some((x) => x.startsWith('--seeds')) ? opt.seeds : opt.seed).split(',').map(Number);
   const runOne = async (seed) => {
     for (let attempt = 0; attempt < 2; attempt++) {
-      const b = await open(`seed=${seed}&bench=1&trials=${opt.trials}&speed=8&fx=0`);
+      let b;
+      try {
+        b = await open(`seed=${seed}&bench=1&trials=${opt.trials}&speed=8&fx=0`);
+      } catch (e) {
+        console.log(`[${seed}] benchmark page never loaded: ${e.message}`);
+        continue;
+      }
       let st;
       try {
         st = await watch(b, (s) => s.bench?.done, (s) => `benchmark ${(s.bench?.progress.index ?? 0) + 1}/${s.bench?.progress.total ?? '?'} · ${s.fps}${s.error ? ` · ERROR ${s.error}` : ''}`);
