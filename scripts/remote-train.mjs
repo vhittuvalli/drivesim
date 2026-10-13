@@ -247,7 +247,9 @@ async function sync() {
     while (queue.length) {
       const { runs, name } = queue.shift();
       const list = runs.map((r) => `${r} ${local.get(r)}`).join('\n');
-      const remoteCmd = `cd ${VOL}/chunks && cat > ${name}.part && mv ${name}.part ${name}.tar && printf '%s\\n' ${q(list)} > ${name}.list && wc -c < ${name}.tar`;
+      // A cut connection ends cat's input like a finished upload does: only a tar that reads to the
+      // end is kept (and listed as uploaded).
+      const remoteCmd = `cd ${VOL}/chunks && cat > ${name}.part && tar tf ${name}.part > /dev/null && mv ${name}.part ${name}.tar && printf '%s\\n' ${q(list)} > ${name}.list && wc -c < ${name}.tar`;
       for (let attempt = 1; ; attempt++) {
         try {
           sent += Number(await sh(`tar cf - -C ${q(opt.data)} ${runs.map(q).join(' ')} | ${pod.ssh} ${q(remoteCmd)}`));
