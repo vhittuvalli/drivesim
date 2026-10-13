@@ -10,6 +10,7 @@
 //
 //   node scripts/improve.mjs --rounds 4
 //   node scripts/improve.mjs --rounds 4 --baseline models/bench-fix-49.json   reuse a benchmark of the current model
+//   node scripts/improve.mjs --rounds 4 --remote     fine-tune on a Runpod GPU pod (scripts/remote-train.mjs)
 //
 // models/loop/ keeps the state between runs: best.json (the best model's benchmark), history.jsonl
 // (one line per round) and history.md (the same as a table). Create models/loop/STOP to end the loop
@@ -36,6 +37,7 @@ const { values: opt } = parseArgs({
     'first-seed': { type: 'string', default: '3001' }, // collection city seeds count up from here
     baseline: { type: 'string' }, // an existing benchmark of the current model on the eval seeds
     commit: { type: 'boolean', default: true }, // commit an accepted model (never pushes)
+    remote: { type: 'boolean', default: false }, // train on a Runpod pod; needs RUNPOD_API_KEY and RUNPOD_VOLUME
   },
 });
 
@@ -115,6 +117,7 @@ async function main() {
   const ok = await fetch('http://localhost:8000/api/datasets').then((r) => r.ok, () => false);
   if (!ok) throw new Error('dev server not reachable at http://localhost:8000: run npm run dev');
   for (const ext of ['onnx', 'json', 'pt']) if (!fs.existsSync(MODEL(ext))) throw new Error(`missing ${MODEL(ext)}`);
+  if (opt.remote && !(process.env.RUNPOD_API_KEY && process.env.RUNPOD_VOLUME)) throw new Error('--remote needs RUNPOD_API_KEY and RUNPOD_VOLUME');
 
   // The best model's benchmark on the eval seeds.
   const bestFile = path.join(LOOP, 'best.json');
@@ -154,11 +157,16 @@ async function main() {
     await run('node', ['scripts/headless.mjs', 'collect', '--seeds', seeds.join(','), '--frames', opt.frames, '--neural', '--noise', '0',
       '--highway', hw.toFixed(2), '--fog', opt.fog, '--scenarios', opt.scenarios, '--only', focus.join(',')], path.join(dir, 'collect.log'));
 
-    // 3. Fine-tune the best model on everything (a data-loader failure resumes once).
-    log(`round ${round}: fine-tuning ${opt.epochs} epochs`);
+    // 3. Fine-tune the best model on everything (a data-loader failure resumes once). With --remote
+    // on a Runpod pod, falling back to the Mac if that fails (no GPU in stock, network down).
+    log(`round ${round}: fine-tuning ${opt.epochs} epochs${opt.remote ? ' on Runpod' : ''}`);
     const cand = path.join(dir, 'cand'), trainLog = path.join(dir, 'train.log');
     const trainArgs = ['train/train.py', '--init', MODEL('pt'), '--epochs', opt.epochs, '--out', cand];
-    if ((await run('.venv/bin/python', trainArgs, trainLog)) !== 0) await run('.venv/bin/python', [...trainArgs, '--resume'], trainLog);
+    if (opt.remote && (await run('node', ['scripts/remote-train.mjs', 'train', ...trainArgs.slice(1)], trainLog)) !== 0) {
+      log(`round ${round}: remote training failed, training on the Mac`);
+      fs.rmSync(`${cand}.onnx`, { force: true });
+    }
+    if (!fs.existsSync(`${cand}.onnx`) && (await run('.venv/bin/python', trainArgs, trainLog)) !== 0) await run('.venv/bin/python', [...trainArgs, '--resume'], trainLog);
     if (!fs.existsSync(`${cand}.onnx`)) {
       record({ ...entry, error: 'training failed' });
       log(`round ${round}: training failed, see ${trainLog}`);
