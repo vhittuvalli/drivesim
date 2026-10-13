@@ -34,6 +34,7 @@ SEG_WEIGHTS = torch.ones(N_CLASSES)
 SEG_WEIGHTS[7], SEG_WEIGHTS[8], SEG_WEIGHTS[9] = 2.0, 4.0, 4.0
 IMAGE_SIZE = (128, 256)  # H, W (both cameras)
 SPEED_SCALE = 15.0  # m/s
+N_OT = 3  # overtake input: going around, merging back, phase unknown (dataset.ot_input)
 WP_SCALE = 10.0  # meters per output unit
 
 
@@ -81,7 +82,9 @@ class Policy(nn.Module):
             block(3, 16, 5, 2), block(16, 24, 3, 2), block(24, 32, 3, 2), block(32, 48, 3, 2), block(48, 48, 3, 2),  # 4x8
             nn.Flatten(), nn.Linear(48 * 4 * 8, 128), nn.ReLU(inplace=True), nn.Dropout(0.3),
         )
-        self.speed_fc = nn.Sequential(nn.Linear(1, 32), nn.ReLU(inplace=True))
+        # Speed and the expert's overtake phase (like a turn command: [going around, merging back,
+        # unknown], unknown only on rows recorded before the phase was).
+        self.speed_fc = nn.Sequential(nn.Linear(1 + N_OT, 32), nn.ReLU(inplace=True))
         self.heads = nn.ModuleList(
             nn.Sequential(nn.Linear(256 + 128 + 32, 128), nn.ReLU(inplace=True), nn.Linear(128, N_WP * 2 + 1)) for _ in range(N_CMD)
         )
@@ -118,7 +121,7 @@ class Policy(nn.Module):
         f5 = self.c5(f4)
         return f2, f3, f4, f5, self.c6(f5)
 
-    def forward(self, image, tele, speed, past=None, past2=None, speed_v=None):
+    def forward(self, image, tele, speed, past=None, past2=None, ot=None, speed_v=None):
         """image, tele, past, past2: (B, 3, 128, 256) float in [0, 1] (past, past2: the main camera
         0.3 s and 1 s earlier; the current frame if omitted); speed: (B, 1) m/s; speed_v: the speed the target-speed heads see
         (training hides it in some samples; the same as speed if omitted).
@@ -131,14 +134,16 @@ class Policy(nn.Module):
         vis = torch.cat([self.fc(torch.cat([f6, f6 - p6, f6 - q6], 1)), self.tele((tele - self.mean) / self.std)], 1)
         light = self.light(vis)
         stop_dist = F.softplus(self.stop(vis)[:, 0]) * 10.0
-        z = torch.cat([vis, self.speed_fc(speed / SPEED_SCALE)], 1)
+        if ot is None:
+            ot = speed.new_zeros(speed.shape[0], N_OT)
+        z = torch.cat([vis, self.speed_fc(torch.cat([speed / SPEED_SCALE, ot], 1))], 1)
         ego_speed = F.softplus(self.ego_speed(vis)[:, 0]) * 5.0
         ttc_inv = torch.sigmoid(self.ttc(z)[:, 0]) * 2.0
         lo = self.lead(z)
         lead = torch.stack([F.softplus(lo[:, 0]) * 20.0, F.softplus(lo[:, 1]) * 5.0], 1)
         out = torch.stack([h(z) for h in self.heads], 1)  # (B, 3, 17); the last column is unused
         wp = out[..., : N_WP * 2].reshape(-1, N_CMD, N_WP, 2) * WP_SCALE
-        zv = z if speed_v is None else torch.cat([vis, self.speed_fc(speed_v / SPEED_SCALE)], 1)
+        zv = z if speed_v is None else torch.cat([vis, self.speed_fc(torch.cat([speed_v / SPEED_SCALE, ot], 1))], 1)
         v_target = F.softplus(torch.cat([h(zv) for h in self.speed_heads], 1)) * 4.0
 
         d = F.interpolate(self.dec(f4), size=f2.shape[-2:], mode='nearest')

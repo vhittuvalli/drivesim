@@ -29,25 +29,26 @@ def export(model, base, info=None):
     speed = torch.tensor([[5.0]])
     past = torch.rand(1, 3, h, w)
     past2 = torch.rand(1, 3, h, w)
+    ot = torch.tensor([[1.0, 0.0, 0.0]])
     onnx_path = base + '.onnx'
-    names = ['image', 'tele', 'speed', 'past', 'past2']
+    names = ['image', 'tele', 'speed', 'past', 'past2', 'overtake']
     torch.onnx.export(
-        model, (image, tele, speed, past, past2), onnx_path, input_names=names, output_names=OUTPUTS,
+        model, (image, tele, speed, past, past2, ot), onnx_path, input_names=names, output_names=OUTPUTS,
         dynamic_axes={n: {0: 'batch'} for n in [*names, *OUTPUTS]}, opset_version=17, dynamo=False,
     )
 
     import onnxruntime as ort
 
     sess = ort.InferenceSession(onnx_path, providers=['CPUExecutionProvider'])
-    got = sess.run(None, {'image': image.numpy(), 'tele': tele.numpy(), 'speed': speed.numpy(), 'past': past.numpy(), 'past2': past2.numpy()})
+    got = sess.run(None, {'image': image.numpy(), 'tele': tele.numpy(), 'speed': speed.numpy(), 'past': past.numpy(), 'past2': past2.numpy(), 'overtake': ot.numpy()})
     with torch.no_grad():
-        want = [t.numpy() for t in model(image, tele, speed, past, past2)]
+        want = [t.numpy() for t in model(image, tele, speed, past, past2, ot)]
     worst = max(float(np.abs(a - b).max()) for a, b in zip(got, want))
     if worst > 1e-3:
         raise SystemExit(f'ONNX output differs from PyTorch by {worst}')
 
     meta = {
-        'inputs': {'image': [1, 3, h, w], 'tele': [1, 3, h, w], 'speed': [1, 1], 'past': [1, 3, h, w], 'past2': [1, 3, h, w]},
+        'inputs': {'image': [1, 3, h, w], 'tele': [1, 3, h, w], 'speed': [1, 1], 'past': [1, 3, h, w], 'past2': [1, 3, h, w], 'overtake': [1, 3]},
         'past_dt': PAST_DT,
         'past2_dt': PAST2_DT,
         'image': 'RGB, float in [0, 1], rows top to bottom (the roof camera, see src/sensor.js)',

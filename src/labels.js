@@ -42,6 +42,18 @@ export function leadOf(exp, v) {
   return { gap: Math.max(0, L.gap), v: L.v };
 }
 
+// The expert's overtake as the network is told it, like a turn command: 0 none, 1 going around
+// (swinging out and passing), 2 merging back. The expert decides both moments from what the network
+// can't see (how far the oncoming lane is clear; when the passed vehicle is behind the car), and
+// without them the network swung out ~1.1 m late and merged back ~1.5 m late.
+export const OT_PHASES = ['none', 'around', 'back'];
+
+export function overtakePhase(expert) {
+  const a = expert?.ot?.active;
+  if (!a) return 0;
+  return a.s1 !== null && expert.s >= a.s1 ? 2 : 1;
+}
+
 export function lightOf(exp) {
   const st = exp.signal;
   return st && st.dist > -1 && st.dist < LIGHT_RANGE && st.state ? st.state : 'none';
@@ -121,7 +133,7 @@ export function makeLabels(world, exp) {
       wp.left = laneChangeWaypoints(route, q, car, lane, lane - 1, car.v);
       wp.right = laneChangeWaypoints(route, q, car, lane, lane + 1, car.v);
     }
-    return { command: cmd.kind, cmdDist: null, wp, vTarget, overtaking: false, road: 'highway', lane, wpScale: scale, light: 'none', lead };
+    return { command: cmd.kind, cmdDist: null, wp, vTarget, overtaking: false, otPhase: 0, road: 'highway', lane, wpScale: scale, light: 'none', lead };
   }
   const overtaking = !!expert.ot.active;
   const taken = pathWaypoints(route, s, car, overtaking ? expert.ot.offsetAt : null, expert.k, scale);
@@ -133,5 +145,5 @@ export function makeLabels(world, exp) {
     // Far from the intersection every branch just follows the lane.
     wp[kind] = cmd.dist > horizon ? taken : branchWaypoints(car, kind, scale);
   }
-  return { command: cmd.kind, cmdDist: Number.isFinite(cmd.dist) ? cmd.dist : null, wp, vTarget, overtaking, road: 'city', lane: null, wpScale: scale, light: lightOf(exp), lead };
+  return { command: cmd.kind, cmdDist: Number.isFinite(cmd.dist) ? cmd.dist : null, wp, vTarget, overtaking, otPhase: overtakePhase(expert), road: 'city', lane: null, wpScale: scale, light: lightOf(exp), lead };
 }
