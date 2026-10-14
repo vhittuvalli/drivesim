@@ -20,6 +20,10 @@ const CHROMES = [
   '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser',
 ];
 const STALL_S = 120; // give up on a browser whose simulation clock hasn't moved for this long
+// ... or that hasn't started it this long after loading. Building a city without a GPU (SwiftShader,
+// several browsers at once) takes minutes: LOAD_S=<seconds> raises it, STAGGER_S=<seconds> spaces
+// the browsers' starts so they don't all build at once.
+const LOAD_S = Number(process.env.LOAD_S ?? 120), STAGGER_S = Number(process.env.STAGGER_S ?? 0);
 
 const { positionals, values: opt } = parseArgs({
   allowPositionals: true,
@@ -45,6 +49,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const chrome = process.env.CHROME ?? CHROMES.find((c) => fs.existsSync(c));
 if (!chrome) throw new Error('Chrome not found: set CHROME=/path/to/chrome');
 
+// Metal on the Mac; on Linux (a Runpod CPU pod, as root) WebGL runs on SwiftShader, the CPU renderer.
+// CHROME_ARGS (space-separated) replaces either. The cameras the driver sees render to fixed-size
+// targets, so VIEWPORT=<w>x<h> (a smaller main view, cheaper without a GPU) doesn't change them.
+const CHROME_ARGS = process.env.CHROME_ARGS?.split(' ') ?? (process.platform === 'linux'
+  ? ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--no-sandbox', '--mute-audio']
+  : ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist', '--mute-audio']);
+const [VIEW_W, VIEW_H] = (process.env.VIEWPORT ?? '1280x720').split('x').map(Number);
+
 // A fresh browser on the app. A page that times out loading (dev server or GPU busy) gets a new
 // browser and another try, up to LOAD_TRIES, instead of failing the whole collection or benchmark.
 const LOAD_TRIES = 4;
@@ -54,8 +66,8 @@ async function open(query) {
     const browser = await puppeteer.launch({
       executablePath: chrome,
       headless: true,
-      args: ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist', '--mute-audio'],
-      defaultViewport: { width: 1280, height: 720 },
+      args: CHROME_ARGS,
+      defaultViewport: { width: VIEW_W, height: VIEW_H },
     });
     try {
       const page = await browser.newPage();
@@ -81,7 +93,7 @@ async function watch({ page, tag }, done, describe) {
     st = await page.evaluate(() => window.__status?.() ?? null).catch(() => null);
     const t = st?.t ?? null;
     if (t !== lastT) (lastT = t), (since = Date.now());
-    else if (Date.now() - since > STALL_S * 1000) {
+    else if (Date.now() - since > (t == null ? LOAD_S : STALL_S) * 1000) {
       console.log(tag, `stalled at sim t=${t}; giving up`);
       return { ...(st ?? {}), stalled: true };
     }
@@ -163,7 +175,8 @@ async function bench() {
   // A city that fails twice (e.g. the network dropped while loading) is reported and left out;
   // the cities that finished are still written.
   const runs = [], failed = [], queue = [...seeds];
-  await Promise.all(Array.from({ length: Math.min(Number(opt.parallel), seeds.length) }, async () => {
+  await Promise.all(Array.from({ length: Math.min(Number(opt.parallel), seeds.length) }, async (_, i) => {
+    await sleep(i * STAGGER_S * 1000);
     while (queue.length) {
       const seed = queue.shift(), r = await runOne(seed);
       if (r) runs.push(r);
