@@ -49,7 +49,9 @@ const { positionals, values: opt } = parseArgs({
     epochs: { type: 'string', default: '3' },
     out: { type: 'string' },
     resume: { type: 'boolean', default: false },
-    gpu: { type: 'string', default: 'NVIDIA GeForce RTX 4090' },
+    // GPU types to try, in order (comma-separated): the 4090 sells out, and the volume ties pods to
+    // one data center. The RTX PRO 4500 (32 GB) is $0.72/h there.
+    gpu: { type: 'string', default: 'NVIDIA GeForce RTX 4090,NVIDIA RTX PRO 4500 Blackwell' },
     image: { type: 'string', default: 'runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404' },
     workers: { type: 'string', default: '8' },
     'max-hours': { type: 'string', default: '4' },
@@ -139,7 +141,7 @@ async function createPod(kind) {
     name: NAME, image: opt.image, cloud: 'SECURE', ports: ['22/tcp'], env: { PUBLIC_KEY: pub },
     ...(kind === 'bench' ? {} : { dataCenterIds: [vol.dataCenter], mounts: { network: [{ volumeId: vol.id, path: '/workspace' }] } }),
     ...{
-      gpu: { gpu: { id: opt.gpu, count: 1, minCudaVersion: '12.8', minVcpuCountPerGpu: 8 }, disk: 120 },
+      gpu: { gpu: { id: opt.gpu.split(',')[0], count: 1, minCudaVersion: '12.8', minVcpuCountPerGpu: 8 }, disk: 120 },
       cpu: { cpu: { id: 'cpu3c', vcpuCount: 2 }, disk: 20 },
       bench: { cpu: { id: opt.cpu, vcpuCount: Number(opt.vcpus) }, disk: 20 },
     }[kind],
@@ -155,9 +157,11 @@ async function createPod(kind) {
           .sort((a, b) => rank[a.availability] - rank[b.availability]).map((d) => d.id);
         if (!body.dataCenterIds.length) throw new Error(`no ${opt.cpu} with ${opt.vcpus} vCPUs in stock anywhere`);
       }
+      const gpus = opt.gpu.split(',');
+      if (kind === 'gpu') body.gpu.id = gpus[(attempt - 1) % gpus.length];
       const p = await api('POST', '/pods', body);
       pod = { id: p.id, kind, price: p.cost || price, created: Date.now(), spentBefore: before };
-      log(`created ${kind} pod ${p.id} in ${p.dataCenterId ?? vol.dataCenter} ($${pod.price}/h)`);
+      log(`created ${kind} pod ${p.id}${kind === 'gpu' ? ` (${body.gpu.id})` : ''} in ${p.dataCenterId ?? vol.dataCenter} ($${pod.price}/h)`);
       break;
     } catch (e) {
       if (attempt >= (kind === 'cpu' ? 5 : 30)) throw e; // a failed create costs nothing
