@@ -5,7 +5,8 @@
 //      mostly in those scenarios,
 //   3. fine-tunes the best model on all of data/,
 //   4. benchmarks the candidate on the same cities as the best model,
-//   5. keeps the candidate only if it has fewer takeovers and no more contacts, and commits it.
+//   5. keeps the candidate only if it has fewer takeovers, no more contacts and no more failed
+//      scenarios, and commits it.
 // The collected data stays in data/ either way, so a rejected round still feeds the next one.
 //
 //   node scripts/improve.mjs --rounds 4
@@ -104,7 +105,7 @@ function record(entry) {
   fs.appendFileSync(path.join(LOOP, 'history.jsonl'), JSON.stringify(entry) + '\n');
   const md = path.join(LOOP, 'history.md');
   if (!fs.existsSync(md)) {
-    fs.writeFileSync(md, `# Improvement loop\n\nBenchmark cities ${evalSeeds.join(', ')}. Kept = fewer takeovers and no more contacts than the best model.\n\n| Round | Date | Cities collected | Targets | Takeovers | Contacts | Scenarios | m/takeover | Kept |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n`);
+    fs.writeFileSync(md, `# Improvement loop\n\nBenchmark cities ${evalSeeds.join(', ')}. Kept = fewer takeovers, no more contacts and no more failed scenarios than the best model.\n\n| Round | Date | Cities collected | Targets | Takeovers | Contacts | Scenarios | m/takeover | Kept |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n`);
   }
   const c = entry.candidate;
   const row = c
@@ -203,11 +204,12 @@ async function main() {
       continue;
     }
 
-    // 5. Keep it only if it is better without more contacts.
+    // 5. Keep it only if it is better without more contacts or failed scenarios (a failure is a
+    // timeout, the car stuck: fewer takeovers alone let round 10 trade 3 of them for 11 takeovers).
     const c = summary(bench), b = summary(best);
-    const kept = c.takeovers < b.takeovers && c.contacts <= b.contacts;
+    const kept = c.takeovers < b.takeovers && c.contacts <= b.contacts && c.passed >= b.passed;
     record({ ...entry, candidate: c, kept });
-    log(`round ${round}: candidate ${c.takeovers} takeovers, ${c.contacts} contacts vs best ${b.takeovers}, ${b.contacts}: ${kept ? 'KEPT' : 'rejected'}`);
+    log(`round ${round}: candidate ${c.takeovers} takeovers, ${c.contacts} contacts, ${c.passed}/${c.scenarios} passed vs best ${b.takeovers}, ${b.contacts}, ${b.passed}/${b.scenarios}: ${kept ? 'KEPT' : 'rejected'}`);
     if (!kept) continue;
     fs.copyFileSync(`${cand}.onnx`, MODEL('onnx'));
     fs.copyFileSync(`${cand}.json`, MODEL('json'));
