@@ -60,7 +60,7 @@ def evaluate(model, loader, device):
     counts = {'light': [0, 0], 'signal': [0, 0], 'stop': [0, 0], 'gap': [0, 0], 'veh': [0, 0], 'ttc_r': [0, 0], 'ttc_p': [0, 0]}
     for batch in loader:
         batch = {k: v.to(device) for k, v in batch.items()}
-        pred = model(batch['image'].float() / 255, batch['tele'].float() / 255, batch['speed'], batch['past'].float() / 255, batch['past2'].float() / 255)
+        pred = model(batch['image'].float() / 255, batch['tele'].float() / 255, batch['speed'], batch['past'].float() / 255, batch['past2'].float() / 255, batch['ot'])
         _, parts = losses(pred, batch)
         wp = pred[0]
         taken = wp[torch.arange(len(wp)), batch['cmd']]
@@ -150,6 +150,14 @@ def main():
         # since 0.3 s]. Keep those weights and start the new change-since-1 s inputs at zero, so the
         # network begins exactly where the checkpoint was and learns to use them.
         # (Same encoder only: with a different one the fc layer reads different features and starts fresh.)
+        # A checkpoint from before the overtake input: its speed layer reads speed alone. Keep that
+        # column and start the overtake columns at zero (the network begins where it was).
+        sw = ck.get('speed_fc.0.weight')
+        if sw is not None and sw.shape != own['speed_fc.0.weight'].shape and sw.shape[0] == own['speed_fc.0.weight'].shape[0]:
+            w = torch.zeros_like(own['speed_fc.0.weight'])
+            w[:, : sw.shape[1]] = sw
+            init['speed_fc.0.weight'] = w
+            print('overtake input: new speed-layer inputs start at zero')
         fw = ck.get('fc.1.weight') if init_arch['encoder'] == encoder else None
         if fw is not None and fw.shape != own['fc.1.weight'].shape and fw.shape[0] == own['fc.1.weight'].shape[0]:
             w = torch.zeros_like(own['fc.1.weight'])
@@ -204,7 +212,7 @@ def main():
             # has to read motion from the two frames (the targets keep the true speed).
             batch['true_speed'] = batch['speed']
             hide = (torch.rand(len(image), 1, device=image.device) < a.speed_dropout).float()
-            pred = model(image, augment(batch['tele']), batch['speed'], past, past2, speed_v=batch['speed'] * (1 - hide))
+            pred = model(image, augment(batch['tele']), batch['speed'], past, past2, batch['ot'], speed_v=batch['speed'] * (1 - hide))
             loss, _ = losses(pred, batch)
             opt.zero_grad(set_to_none=True)
             loss.backward()

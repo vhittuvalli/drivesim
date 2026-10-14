@@ -36,6 +36,16 @@ def lane_command(r):
         r['cmd_dist'] = None
     return r
 LIGHTS = ['none', 'red', 'yellow', 'green']  # must match src/labels.js
+
+
+def ot_input(r):
+    """The overtake input (src/labels.js overtakePhase, src/neural.js): [going around, merging back,
+    phase unknown]. Rows from before the phase was recorded know only that an overtake was on, not
+    its phase: flagged unknown, so they still teach overtakes from the images."""
+    ph = r.get('ot_phase')
+    if ph is None:
+        return [0.0, 0.0, 1.0] if r.get('overtaking') and r.get('road') != 'highway' else [0.0, 0.0, 0.0]
+    return [float(ph == 1), float(ph == 2), 0.0]
 # Beyond this distance a lamp is a pixel or two even in the traffic-light camera, so the light
 # label isn't learnable there: it is left out of the light loss (driving labels are unaffected).
 LIGHT_READABLE = 50.0  # m to the intersection
@@ -234,6 +244,7 @@ class DriveDataset(Dataset):
             'ttc': torch.tensor(ttc_target(r)[0], dtype=torch.float32),
             'ttc_mask': torch.tensor(ttc_target(r)[1], dtype=torch.float32),
             'speed': torch.tensor([max(0.0, v)], dtype=torch.float32),
+            'ot': torch.tensor(ot_input(r), dtype=torch.float32),
             'wp': torch.from_numpy(wp),
             'wp_mask': torch.from_numpy(mask),
             'cmd': torch.tensor(COMMANDS.index(r['command'])),
