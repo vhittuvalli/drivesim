@@ -152,32 +152,37 @@ async function main() {
     const focus = targets(best, Number(opt.targets));
     const hw = focus.some((id) => id.startsWith('hw-')) ? Math.max(0.35, highwayShare(best)) : highwayShare(best);
     const entry = { round, date: new Date().toISOString(), cities: seeds.length, firstSeed: seeds[0], lastSeed: seeds.at(-1), targets: focus, highway: hw, best: summary(best) };
-    log(`round ${round}: collecting ${seeds.length} cities (${seeds[0]}-${seeds.at(-1)}), focus ${focus.join(',')}, highway ${hw.toFixed(2)}`);
-
-    // 1-2. DAgger with the best model (it is what models/ holds).
-    await run('node', ['scripts/headless.mjs', 'collect', '--seeds', seeds.join(','), '--frames', opt.frames, '--neural', '--noise', '0',
-      '--highway', hw.toFixed(2), '--fog', opt.fog, '--scenarios', opt.scenarios, '--only', focus.join(',')], path.join(dir, 'collect.log'));
-
-    // 3. Fine-tune the best model on everything (a data-loader failure resumes once). With --remote
-    // on a Runpod pod, falling back to the Mac if that fails (no GPU in stock, network down).
-    log(`round ${round}: fine-tuning ${opt.epochs} epochs${opt.remote ? ' on Runpod' : ''}`);
     const cand = path.join(dir, 'cand'), trainLog = path.join(dir, 'train.log');
-    const trainArgs = ['train/train.py', '--init', MODEL('pt'), '--epochs', opt.epochs, '--out', cand];
-    const remote = opt.remote ? await run('node', ['scripts/remote-train.mjs', 'train', ...trainArgs.slice(1)], trainLog) : null;
-    if (remote === 3) { // scripts/remote-train.mjs: the Runpod budget is used up
-      record({ ...entry, error: 'Runpod budget used up' });
-      log(`round ${round}: Runpod budget used up (see ${trainLog}); ending`);
-      break;
-    }
-    if (remote) {
-      log(`round ${round}: remote training failed, training on the Mac`);
-      fs.rmSync(`${cand}.onnx`, { force: true });
-    }
-    if (!fs.existsSync(`${cand}.onnx`) && (await run('.venv/bin/python', trainArgs, trainLog)) !== 0) await run('.venv/bin/python', [...trainArgs, '--resume'], trainLog);
-    if (!fs.existsSync(`${cand}.onnx`)) {
-      record({ ...entry, error: 'training failed' });
-      log(`round ${round}: training failed, see ${trainLog}`);
-      continue;
+    // A round whose process was stopped after training (models/loop/STOP only ends the loop between
+    // rounds) still has its candidate: it picks up at the benchmark.
+    if (fs.existsSync(`${cand}.onnx`)) log(`round ${round}: resuming at the benchmark with the candidate in ${dir}`);
+    else {
+      log(`round ${round}: collecting ${seeds.length} cities (${seeds[0]}-${seeds.at(-1)}), focus ${focus.join(',')}, highway ${hw.toFixed(2)}`);
+
+      // 1-2. DAgger with the best model (it is what models/ holds).
+      await run('node', ['scripts/headless.mjs', 'collect', '--seeds', seeds.join(','), '--frames', opt.frames, '--neural', '--noise', '0',
+        '--highway', hw.toFixed(2), '--fog', opt.fog, '--scenarios', opt.scenarios, '--only', focus.join(',')], path.join(dir, 'collect.log'));
+
+      // 3. Fine-tune the best model on everything (a data-loader failure resumes once). With --remote
+      // on a Runpod pod, falling back to the Mac if that fails (no GPU in stock, network down).
+      log(`round ${round}: fine-tuning ${opt.epochs} epochs${opt.remote ? ' on Runpod' : ''}`);
+      const trainArgs = ['train/train.py', '--init', MODEL('pt'), '--epochs', opt.epochs, '--out', cand];
+      const remote = opt.remote ? await run('node', ['scripts/remote-train.mjs', 'train', ...trainArgs.slice(1)], trainLog) : null;
+      if (remote === 3) { // scripts/remote-train.mjs: the Runpod budget is used up
+        record({ ...entry, error: 'Runpod budget used up' });
+        log(`round ${round}: Runpod budget used up (see ${trainLog}); ending`);
+        break;
+      }
+      if (remote) {
+        log(`round ${round}: remote training failed, training on the Mac`);
+        fs.rmSync(`${cand}.onnx`, { force: true });
+      }
+      if (!fs.existsSync(`${cand}.onnx`) && (await run('.venv/bin/python', trainArgs, trainLog)) !== 0) await run('.venv/bin/python', [...trainArgs, '--resume'], trainLog);
+      if (!fs.existsSync(`${cand}.onnx`)) {
+        record({ ...entry, error: 'training failed' });
+        log(`round ${round}: training failed, see ${trainLog}`);
+        continue;
+      }
     }
 
     // 4. Benchmark the candidate in place of the best model, then put the best back.
