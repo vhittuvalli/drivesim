@@ -308,7 +308,21 @@ async function train() {
     if (exit === 0) break;
   }
   if (exit !== 0) throw new Error(`training failed on the pod (exit ${exit}); log in ${localLog}`);
-  for (const ext of ['onnx', 'json', 'pt']) await sh(`${pod.ssh} ${q(`cat ${outR}.${ext}`)} > ${q(`${opt.out}.${ext}`)}`);
+  // A dropped connection here would throw away a finished run (and the loop would retrain on the
+  // Mac): a few tries, a minute apart. The outputs also stay on the volume under out/.
+  for (const ext of ['onnx', 'json', 'pt']) {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await sh(`${pod.ssh} ${q(`cat ${outR}.${ext}`)} > ${q(`${opt.out}.${ext}.part`)}`);
+        fs.renameSync(`${opt.out}.${ext}.part`, `${opt.out}.${ext}`);
+        break;
+      } catch (e) {
+        if (attempt >= 5) throw e;
+        log(`fetching ${outR}.${ext} failed (${e.message.slice(-120)}); again in 60 s`);
+        await sleep(60_000);
+      }
+    }
+  }
   log(`wrote ${opt.out}.onnx, .json and .pt`);
 }
 
