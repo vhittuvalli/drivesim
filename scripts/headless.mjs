@@ -23,7 +23,7 @@ const STALL_S = 120; // give up on a browser whose simulation clock hasn't moved
 // ... or that hasn't started it this long after loading. Building a city without a GPU (SwiftShader,
 // several browsers at once) takes minutes: LOAD_S=<seconds> raises it, STAGGER_S=<seconds> spaces
 // the browsers' starts so they don't all build at once.
-const LOAD_S = Number(process.env.LOAD_S ?? 120), STAGGER_S = Number(process.env.STAGGER_S ?? 0);
+const LOAD_S = Number(process.env.LOAD_S ?? 300), STAGGER_S = Number(process.env.STAGGER_S ?? 0);
 
 const { positionals, values: opt } = parseArgs({
   allowPositionals: true,
