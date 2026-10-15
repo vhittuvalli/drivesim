@@ -11,6 +11,7 @@
 // Each seed (city) gets its own browser; --parallel of them run at once.
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import puppeteer from 'puppeteer-core';
 
@@ -57,6 +58,29 @@ const CHROME_ARGS = process.env.CHROME_ARGS?.split(' ') ?? (process.platform ===
   : ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist', '--mute-audio']);
 const [VIEW_W, VIEW_H] = (process.env.VIEWPORT ?? '1280x720').split('x').map(Number);
 
+// The app loads three.js and onnxruntime-web from jsdelivr (pinned versions). The browsers here get
+// them from a local copy in .cdn-cache/ (filled on first use), so a Wi-Fi drop or network change
+// mid-run doesn't break page loads, which cost several improvement-loop benchmarks.
+const CDN = 'https://cdn.jsdelivr.net/', CDN_CACHE = path.join(path.dirname(new URL(import.meta.url).pathname), '..', '.cdn-cache');
+async function fromCache(req) {
+  const url = req.url();
+  if (!url.startsWith(CDN)) return req.continue();
+  const file = path.join(CDN_CACHE, createHash('sha1').update(url).digest('hex'));
+  try {
+    if (!fs.existsSync(file)) {
+      const r = await fetch(url);
+      if (!r.ok) return req.continue();
+      fs.mkdirSync(CDN_CACHE, { recursive: true });
+      fs.writeFileSync(`${file}.type`, r.headers.get('content-type') ?? 'application/octet-stream');
+      fs.writeFileSync(`${file}.part`, Buffer.from(await r.arrayBuffer()));
+      fs.renameSync(`${file}.part`, file);
+    }
+    await req.respond({ status: 200, contentType: fs.readFileSync(`${file}.type`, 'utf8'), body: fs.readFileSync(file), headers: { 'Access-Control-Allow-Origin': '*' } });
+  } catch {
+    await req.continue().catch(() => {});
+  }
+}
+
 // A fresh browser on the app. A page that times out loading (dev server or GPU busy) gets a new
 // browser and another try, up to LOAD_TRIES, instead of failing the whole collection or benchmark.
 const LOAD_TRIES = 4;
@@ -71,6 +95,8 @@ async function open(query) {
     });
     try {
       const page = await browser.newPage();
+      await page.setRequestInterception(true);
+      page.on('request', fromCache);
       page.on('pageerror', (e) => console.log(tag, 'page error:', e.message));
       page.on('console', (m) => m.type() === 'error' && !m.text().includes('404') && console.log(tag, m.text()));
       await page.goto(`${opt.base}/?${query}`, { timeout: 60_000 });
