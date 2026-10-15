@@ -84,10 +84,12 @@ async function open(query) {
   }
 }
 
-// Poll window.__status() until done(status), the GPU context is lost, or the clock stalls; returns
-// the last status (with .lost or .stalled set in those cases).
-async function watch({ page, tag }, done, describe) {
-  let lastT = null, since = Date.now(), lastLog = 0, st = null;
+// Poll window.__status() until done(status), the GPU context is lost, the clock stalls, or the run
+// hasn't started(status) LOAD_S after opening (a page half-loaded when the network dropped drives
+// on without ever starting it); returns the last status (with .lost or .stalled set in those cases).
+async function watch({ page, tag }, done, describe, started = () => true) {
+  let lastT = null, since = Date.now(), lastLog = 0, st = null, isRunning = false;
+  const opened = Date.now();
   for (;;) {
     await sleep(3000);
     st = await page.evaluate(() => window.__status?.() ?? null).catch(() => null);
@@ -95,6 +97,11 @@ async function watch({ page, tag }, done, describe) {
     if (t !== lastT) (lastT = t), (since = Date.now());
     else if (Date.now() - since > (t == null ? LOAD_S : STALL_S) * 1000) {
       console.log(tag, `stalled at sim t=${t}; giving up`);
+      return { ...(st ?? {}), stalled: true };
+    }
+    isRunning ||= Boolean(st && started(st));
+    if (!isRunning && Date.now() - opened > LOAD_S * 1000) {
+      console.log(tag, `run never started at sim t=${t}; giving up`);
       return { ...(st ?? {}), stalled: true };
     }
     if (st?.contextLost) {
@@ -163,7 +170,8 @@ async function bench() {
       }
       let st;
       try {
-        st = await watch(b, (s) => s.bench?.done, (s) => `benchmark ${(s.bench?.progress.index ?? 0) + 1}/${s.bench?.progress.total ?? '?'} · ${s.fps}${s.error ? ` · ERROR ${s.error}` : ''}`);
+        st = await watch(b, (s) => s.bench?.done, (s) => `benchmark ${(s.bench?.progress.index ?? 0) + 1}/${s.bench?.progress.total ?? '?'} · ${s.fps}${s.error ? ` · ERROR ${s.error}` : ''}`,
+          (s) => s.bench?.progress?.total != null);
       } finally {
         await b.browser.close();
       }
