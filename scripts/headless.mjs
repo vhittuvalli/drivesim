@@ -7,6 +7,7 @@
 //   node scripts/headless.mjs collect ... --neural --scenarios 0.7 --only lead-brake,hw-jam   targeted DAgger
 //   node scripts/headless.mjs bench --seed 1 --out models/bench.json
 //   node scripts/headless.mjs bench --seeds 1,2,3 --out models/bench.json            three cities, combined
+//   node scripts/headless.mjs bench --seeds 1,2,3 --lenient ...    safety driver steps in only for danger
 //
 // Each seed (city) gets its own browser; --parallel of them run at once.
 import fs from 'node:fs';
@@ -43,6 +44,7 @@ const { positionals, values: opt } = parseArgs({
     seed: { type: 'string', default: '1' },
     trials: { type: 'string', default: '2' },
     out: { type: 'string' },
+    lenient: { type: 'boolean', default: false }, // bench: the lenient safety driver (src/safety.js)
   },
 });
 
@@ -189,7 +191,7 @@ async function bench() {
     for (let attempt = 0; attempt < 2; attempt++) {
       let b;
       try {
-        b = await open(`seed=${seed}&bench=1&trials=${opt.trials}&speed=8&fx=0`);
+        b = await open(`seed=${seed}&bench=1&trials=${opt.trials}&speed=8&fx=0${opt.lenient ? '&safety=lenient' : ''}`);
       } catch (e) {
         console.log(`[${seed}] benchmark page never loaded: ${e.message}`);
         continue;
@@ -232,7 +234,7 @@ async function bench() {
     scenarioTakeovers: total((s) => s.scenarioTakeovers), driveKm: dist / 1000, autonomy: dist ? auto / dist : 0,
     takeovers: driveTO, metersPerTakeover: driveTO ? auto / driveTO : null, contacts: total((s) => s.contacts), reasons,
   };
-  const out = { seeds, trials: Number(opt.trials), date: new Date().toISOString(), model: runs[0]?.model, summary, perSeed: runs.map((r) => ({ seed: r.seed, summary: r.summary })), results };
+  const out = { seeds, trials: Number(opt.trials), safety: opt.lenient ? 'lenient' : 'strict', date: new Date().toISOString(), model: runs[0]?.model, summary, perSeed: runs.map((r) => ({ seed: r.seed, summary: r.summary })), results };
   for (const r of runs) {
     const s = r.summary;
     console.log(`seed ${r.seed}: ${s.passed}/${s.scenarios} scenarios (${s.clean} clean), ${s.scenarioTakeovers} scenario takeovers, ${s.driveKm.toFixed(2)} km driven, ${s.takeovers} drive takeovers, ${s.contacts} contacts`);

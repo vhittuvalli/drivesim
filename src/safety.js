@@ -5,8 +5,13 @@
 // stallGrace), or is closing on an obstacle with under ttcMin seconds to impact while braking less
 // than the expert, the expert takes over for a few seconds (a disengagement). The headline
 // metric is autonomous distance per disengagement, as reported by real AV programs.
+//
+// Lenient mode (`lenient`, ?safety=lenient) takes over only where the learned driver is in danger,
+// not where it merely differs from the expert: collision risk, an imminent scrape, running a red
+// light, and its center actually outside the lane (LANE_W / 2, not maxLateral). It ignores heading,
+// braking later than the expert and slowness to pull away, to tell style differences from errors.
 import { angleWrap, HALF_LEN } from './planner.js';
-import { WHEELBASE, MAX_STEER } from './config.js';
+import { WHEELBASE, MAX_STEER, LANE_W } from './config.js';
 
 export const TAKEOVER_SECONDS = 3;
 
@@ -61,6 +66,7 @@ export class SafetyDriver {
   constructor({ maxLateral = 1.1, maxHeading = 0.45, brakeDemand = -3, brakeGrace = 0.3, stallGrace = 2.5, ttcMin = 2, ttcGrace = 0.2, maxLateralOvertake = 1.8, scrapeHorizon = 0.8 } = {}) {
     Object.assign(this, { maxLateral, maxHeading, brakeDemand, brakeGrace, stallGrace, ttcMin, ttcGrace, maxLateralOvertake, scrapeHorizon });
     this.enabled = true;
+    this.lenient = false; // see the top of this file
     this.reset();
   }
 
@@ -98,11 +104,12 @@ export class SafetyDriver {
     if (ot) this.overtakeEnd = world.t;
     const left = expert.lateral < 0 && world.t - this.overtakeEnd < 1;
     const right = expert.lateral > 0 && ot && expert.s < ot.s0 + ot.ramp;
-    if (Math.abs(expert.lateral) > (left || right ? this.maxLateralOvertake : this.maxLateral)) return 'left the lane';
+    const maxLateral = this.lenient ? Math.max(this.maxLateral, LANE_W / 2) : this.maxLateral;
+    if (Math.abs(expert.lateral) > (left || right ? Math.max(this.maxLateralOvertake, maxLateral) : maxLateral)) return 'left the lane';
     // Heading of the intended path here, including the swerve of an overtake.
     const p = expert.route.at(expert.s, expert.k), off = expert.ot.offsetAt;
     const pathH = p.h - Math.atan((off(expert.s + 1) - off(expert.s - 1)) / 2);
-    if (Math.abs(angleWrap(car.h - pathH)) > this.maxHeading) return 'wrong heading';
+    if (!this.lenient && Math.abs(angleWrap(car.h - pathH)) > this.maxHeading) return 'wrong heading';
     // Stopped at a green light or behind nothing: a learned driver can latch onto its own zero
     // speed and never pull away, which none of the other checks would notice.
     // Not while the expert is itself held by a light, a yield or a blocked box: then it is only
@@ -110,7 +117,7 @@ export class SafetyDriver {
     const held = exp.reason === 'signal' || exp.reason === 'yield' || exp.reason === 'box';
     const stall = !held && exp.acc > 0.5 && car.v < 0.5 && nn.throttle < 0.05;
     this.stalled = stall ? this.stalled + dt : 0;
-    if (this.stalled > this.stallGrace) return 'did not pull away';
+    if (!this.lenient && this.stalled > this.stallGrace) return 'did not pull away';
     // Time to collision with the obstacle the expert sees: waiting for the expert's braking demand
     // to outlast brakeGrace was too late to avoid contact (the network braking late in overtakes).
     // A short grace (two 10 Hz observations): a learned driver can't react on the very step the
@@ -126,7 +133,7 @@ export class SafetyDriver {
     if (scrape) return scrape === 'pedestrian' ? 'about to hit a pedestrian' : 'about to scrape a vehicle';
     const under = exp.acc < this.brakeDemand && car.v > 1 && nn.throttle > exp.throttle + 0.35;
     this.underBraking = under ? this.underBraking + dt : 0;
-    if (under && this.underBraking > this.brakeGrace) {
+    if (under && this.underBraking > this.brakeGrace && (!this.lenient || exp.reason === 'signal')) {
       return { pedestrian: 'late braking for a pedestrian', signal: 'about to run a red light', crossing: 'late braking for a crossing vehicle' }[exp.reason] ?? 'late braking';
     }
     return null;

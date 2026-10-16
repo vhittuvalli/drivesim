@@ -12,7 +12,8 @@ URL params: `?seed=<int>` (city layout), `?hour=4..22` (time of day), `?cam=chas
 `?road=highway` (start on the highway), `?hwcars=0..160` (highway traffic),
 `?weather=clear|rain|fog|snow`, `?scenario=<id>` (see below), `?debug=1` (planner overlay), `?speed=1|2|4|8|16`,
 `?fx=0` (no post-processing), and for the learning tools `?collect=<frames>&noise=0..1`, `?neural=1`,
-`?bench=1&trials=<n>` (see [Learning to drive](#learning-to-drive)).
+`?bench=1&trials=<n>` (see [Learning to drive](#learning-to-drive)), `?safety=lenient` (the safety driver
+steps in only for danger: collision risk, an imminent scrape, a red light, or the car outside its lane).
 The **Link** button copies a URL with the current setup.
 
 Keys: `1`–`4` switch camera, `Space` pauses, `M` take the wheel / hand back, `O` planner overlay,
