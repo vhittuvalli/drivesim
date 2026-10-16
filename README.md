@@ -55,8 +55,11 @@ running out of time).
 | `pull-out` | A parked car pulls into the lane just ahead |
 | `red-runner` | You have a green light; a car on the cross street runs its red |
 | `unprotected-left` | Left turn on green through a stream of oncoming traffic |
+| `turn-right-ped` | Right turn on green while a pedestrian crosses the street you turn into |
+| `turn-left-ped` | Same for a left turn |
 | `hw-cut-in` | Highway, 100 km/h: a slower car swerves into your lane 14 m ahead and brakes; a car alongside blocks the other lane |
 | `hw-stalled` | A broken-down car in the right lane; find a gap in the middle-lane traffic and move over |
+| `hw-pass` | A slower car ahead in the middle lane, cars alongside on both sides: wait for a gap, change lanes and pass |
 | `hw-jam` | Traffic ahead brakes at 6.5 m/s² to a standstill in every lane, waits, then moves off |
 
 ### Planner overlay (`O`)
