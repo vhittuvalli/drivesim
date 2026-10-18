@@ -17,7 +17,7 @@
 // SSH_KEY=<private key path>). Every pod is deleted when the script
 // ends, and also from the pod itself after --max-hours, should the Mac sleep or the script die.
 //
-// Budget: Runpod spending since RUNPOD_BUDGET_SINCE stays under RUNPOD_BUDGET dollars (default $10
+// Budget: Runpod spending since RUNPOD_BUDGET_SINCE stays under RUNPOD_BUDGET dollars (default $15
 // since 2026-10-13). A pod is created only if the spend so far plus the expected cost of the run fits;
 // a running pod is deleted when the budget runs out (by this script, and by the pod's own timer).
 // The script then exits with code 3 (improve.mjs ends the loop on it).
@@ -35,7 +35,7 @@ const FAKE = process.env.RT_FAKE_POD;
 const VOL = FAKE ? `${FAKE}/workspace/drivesim` : '/workspace/drivesim'; // network volume: chunks/, out/, pip cache
 const WORK = FAKE ? `${FAKE}/root` : '/root'; // the pod's own disk
 const NAME = 'drivesim-train'; // every pod this script creates is named this (cleanup relies on it)
-const BUDGET = Number(process.env.RUNPOD_BUDGET ?? 10); // dollars
+const BUDGET = Number(process.env.RUNPOD_BUDGET ?? 15); // dollars
 const SINCE = process.env.RUNPOD_BUDGET_SINCE ?? '2026-10-13T00:00:00Z';
 const LEDGER = path.join(ROOT, 'models', 'loop', 'runpod-spend.jsonl'); // one line per pod: what it cost
 const OVER_BUDGET = 3; // exit code
