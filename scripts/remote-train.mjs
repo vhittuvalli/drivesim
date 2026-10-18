@@ -146,39 +146,51 @@ async function createPod(kind) {
       bench: { cpu: { id: opt.cpu, vcpuCount: Number(opt.vcpus) }, disk: 20 },
     }[kind],
   };
-  // Stock comes and goes: tries for half an hour (5 min for the upload pod). A bench pod names the data centers that
-  // have its CPU type at its size right now (without them the create doesn't look everywhere).
-  for (let attempt = 1; ; attempt++) {
-    try {
-      if (kind === 'bench') {
-        const cat = await api('GET', `/catalog/cpus?include=AVAILABILITY&product=POD&vcpuCount=${opt.vcpus}`);
-        const rank = { HIGH: 0, MEDIUM: 1, LOW: 2 };
-        body.dataCenterIds = (cat.cpus.find((c) => c.id === opt.cpu)?.dataCenters ?? [])
-          .sort((a, b) => rank[a.availability] - rank[b.availability]).map((d) => d.id);
-        if (!body.dataCenterIds.length) throw new Error(`no ${opt.cpu} with ${opt.vcpus} vCPUs in stock anywhere`);
+  for (let launch = 1; ; launch++) {
+    // Stock comes and goes: tries for half an hour (5 min for the upload pod). A bench pod names the data centers that
+    // have its CPU type at its size right now (without them the create doesn't look everywhere).
+    for (let attempt = 1; ; attempt++) {
+      try {
+        if (kind === 'bench') {
+          const cat = await api('GET', `/catalog/cpus?include=AVAILABILITY&product=POD&vcpuCount=${opt.vcpus}`);
+          const rank = { HIGH: 0, MEDIUM: 1, LOW: 2 };
+          body.dataCenterIds = (cat.cpus.find((c) => c.id === opt.cpu)?.dataCenters ?? [])
+            .sort((a, b) => rank[a.availability] - rank[b.availability]).map((d) => d.id);
+          if (!body.dataCenterIds.length) throw new Error(`no ${opt.cpu} with ${opt.vcpus} vCPUs in stock anywhere`);
+        }
+        const gpus = opt.gpu.split(',');
+        if (kind === 'gpu') body.gpu.id = gpus[(attempt - 1) % gpus.length];
+        const p = await api('POST', '/pods', body);
+        pod = { id: p.id, kind, price: p.cost || price, created: Date.now(), spentBefore: before };
+        log(`created ${kind} pod ${p.id}${kind === 'gpu' ? ` (${body.gpu.id})` : ''} in ${p.dataCenterId ?? vol.dataCenter} ($${pod.price}/h)`);
+        break;
+      } catch (e) {
+        if (attempt >= (kind === 'cpu' ? 5 : 30)) throw e; // a failed create costs nothing
+        log(`pod create failed (${e.message.slice(0, 160)}); retrying in 60 s`);
+        await sleep(60_000);
       }
-      const gpus = opt.gpu.split(',');
-      if (kind === 'gpu') body.gpu.id = gpus[(attempt - 1) % gpus.length];
-      const p = await api('POST', '/pods', body);
-      pod = { id: p.id, kind, price: p.cost || price, created: Date.now(), spentBefore: before };
-      log(`created ${kind} pod ${p.id}${kind === 'gpu' ? ` (${body.gpu.id})` : ''} in ${p.dataCenterId ?? vol.dataCenter} ($${pod.price}/h)`);
-      break;
-    } catch (e) {
-      if (attempt >= (kind === 'cpu' ? 5 : 30)) throw e; // a failed create costs nothing
-      log(`pod create failed (${e.message.slice(0, 160)}); retrying in 60 s`);
-      await sleep(60_000);
     }
-  }
-  // Wait for SSH: the pod's public port for 22, then a login that works.
-  const t0 = Date.now();
-  for (;;) {
-    if (Date.now() - t0 > 15 * 60_000) throw new Error(`pod ${pod.id} not reachable over SSH after 15 min`);
-    await sleep(10_000);
-    const p = await api('GET', `/pods/${pod.id}`).catch(() => null);
-    const port = p?.runtime?.ports?.find((x) => x.private === 22 && x.public);
-    if (!port?.ip) continue;
-    pod.ssh = `ssh -i ${q(SSH_KEY)} -p ${port.public} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ServerAliveInterval=30 -o ConnectTimeout=20 root@${port.ip}`;
-    if (await sh(`${pod.ssh} true`).then(() => true, () => false)) break;
+    // Wait for SSH: the pod's public port for 22, then a login that works.
+    const t0 = Date.now();
+    let reachable = false;
+    for (;;) {
+      if (Date.now() - t0 > 15 * 60_000) break;
+      await sleep(10_000);
+      const p = await api('GET', `/pods/${pod.id}`).catch(() => null);
+      const port = p?.runtime?.ports?.find((x) => x.private === 22 && x.public);
+      if (!port?.ip) continue;
+      pod.ssh = `ssh -i ${q(SSH_KEY)} -p ${port.public} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ServerAliveInterval=30 -o ConnectTimeout=20 root@${port.ip}`;
+      if (await sh(`${pod.ssh} true`).then(() => true, () => false)) {
+        reachable = true;
+        break;
+      }
+    }
+    if (reachable) break;
+    // Some hosts never open SSH (seen with an RTX PRO 4500): replace the pod rather than give up,
+    // which made the loop retrain on the Mac for hours.
+    log(`pod ${pod.id} not reachable over SSH after 15 min; deleting it${launch < 3 ? ' and creating another' : ''}`);
+    await deletePod();
+    if (launch >= 3) throw new Error('no pod became reachable over SSH in 3 tries');
   }
   log(`pod ${pod.id} up`);
   // The pod deletes itself after --max-hours or when the budget runs out, whatever happens to this script.
