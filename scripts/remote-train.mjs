@@ -115,10 +115,12 @@ async function spent() {
   return Math.max(t.totalAmount ?? 0, ledger().reduce((a, e) => a + e.cost, 0) + storage);
 }
 
-// What a run of this kind is expected to cost: the dearest one so far, or a cautious default.
+// What a run of this kind is expected to cost: the median of the last five (the dearest one let a
+// single 3-hour training block every 20-minute fine-tune), or a cautious default. A running pod is
+// still stopped at the budget, so a run that costs more than expected can't overspend.
 function expected(kind, price) {
-  const past = ledger().filter((e) => e.kind === kind).map((e) => e.cost);
-  return past.length ? Math.max(...past) : price * (kind === 'gpu' ? 1.5 : 3); // bench: 3 h
+  const past = ledger().filter((e) => e.kind === kind).slice(-5).map((e) => e.cost).sort((a, b) => a - b);
+  return past.length ? past[Math.floor(past.length / 2)] : price * (kind === 'gpu' ? 1.5 : 3); // bench: 3 h
 }
 
 // ---- pods ----
