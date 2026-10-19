@@ -176,7 +176,7 @@ def split(runs, val_frac=0.1, block=200):
 
 def sample_weight(r):
     """Oversample the informative moments: turns, lane changes, speed changes, pulling away from a
-    stop, hard braking and yielding to pedestrians. Undersample waiting at lights."""
+    stop, hard braking, yielding to pedestrians and reacting to other cars. Undersample waiting at lights."""
     w = 1.0
     if r['command'] != 'straight' and r['cmd_dist'] is not None and r['cmd_dist'] < 30:
         w *= 2.5
@@ -201,6 +201,13 @@ def sample_weight(r):
         # Yielding to someone on the road, mostly on the crosswalk of a street we turn into: 1.6% of
         # frames, 4% of draws before this, and the network hit pedestrians there (turn-*-ped). ~12%.
         w *= 3
+    if r.get('reason') == 'crossing':
+        # Reacting to a car crossing or pulling into our path (pull-out, red-runner): 0.1% of frames,
+        # and the network braked late in every run of those scenarios. ~2% of draws.
+        w *= 6
+    elif r.get('reason') == 'vehicle' and r['v_target'] < r['v'] - 2:
+        # Braking hard for a car ahead (a jam, a slower car in the lane): 4% of draws before, ~7.5%.
+        w *= 2
     return w
 
 
