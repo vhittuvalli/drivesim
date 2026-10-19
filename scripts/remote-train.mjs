@@ -306,12 +306,23 @@ async function train() {
   for (const resume of opt.resume ? [true] : [false, true]) {
     log(`training on the pod${resume ? ' (resuming)' : ''}: ${outR}`);
     await start(resume);
+    let gone = 0, restarts = 0;
     for (;;) {
       await sleep(FAKE ? 5000 : 60_000);
       checkBudget();
-      const st = await sh(`${pod.ssh} ${q(`cat ${outR}.exit 2>/dev/null; echo ---; tail -n +${shown + 1} ${outR}.log`)}`).catch(() => null);
+      const st = await sh(`${pod.ssh} ${q(`cat ${outR}.exit 2>/dev/null; echo ---; pgrep -f train/train.py > /dev/null && echo run || echo gone; echo ---; tail -n +${shown + 1} ${outR}.log`)}`).catch(() => null);
       if (st == null) continue; // SSH hiccup: the training goes on
-      const [code, newLines] = st.split('---\n');
+      const [code, running, newLines] = st.split('---\n');
+      // The pod's container can restart (seen once, 25 min in), killing the training without an
+      // exit code: after two checks with neither, carry on from its last checkpoint.
+      gone = !code.trim() && running.trim() === 'gone' ? gone + 1 : 0;
+      if (gone >= 2 && restarts < 3) {
+        restarts++;
+        log(`training stopped without finishing (did the container restart?); resuming from its checkpoint (${restarts}/3)`);
+        await start(true);
+        gone = 0;
+        continue;
+      }
       if (newLines) {
         fs.appendFileSync(localLog, newLines);
         shown += newLines.split('\n').length - 1;
