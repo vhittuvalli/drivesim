@@ -6,13 +6,16 @@
 //   3. fine-tunes the best model on all of data/,
 //   4. benchmarks the candidate on the same cities as the best model,
 //   5. keeps the candidate only if it has fewer takeovers, no more contacts and no more failed
-//      scenarios, and commits it.
+//      scenarios, and commits it. One extra contact at walking pace with a vehicle (a scrape, never
+//      a pedestrian) gets a second chance: both models drive the confirmation cities, and the
+//      candidate is kept only with no contact there and fewer takeovers than the best.
 // The collected data stays in data/ either way, so a rejected round still feeds the next one.
 //
 //   node scripts/improve.mjs --rounds 4
 //   node scripts/improve.mjs --rounds 4 --baseline models/bench-fix-49.json   reuse a benchmark of the current model
 //   node scripts/improve.mjs --rounds 4 --remote     fine-tune on a Runpod GPU pod (scripts/remote-train.mjs);
 //                                                     the loop ends when the Runpod budget is used up
+//   node scripts/improve.mjs --confirm-round 28       decide an earlier round again with that rule
 //
 // models/loop/ keeps the state between runs: best.json (the best model's benchmark), history.jsonl
 // (one line per round) and history.md (the same as a table). Create models/loop/STOP to end the loop
@@ -20,6 +23,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { parseArgs } from 'node:util';
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
@@ -30,6 +34,10 @@ const { values: opt } = parseArgs({
     // Benchmark cities, never collected on. Nine, not six: always picking the best model on the
     // same six cities partly picked models that suited them (a 29% gain there, 7% on cities 1-3).
     'eval-seeds': { type: 'string', default: '1,2,3,4,5,6,7,8,9' },
+    // Cities for confirming a candidate with one extra minor contact: never benchmarked, and never
+    // collected on (collection starts at 101).
+    'confirm-seeds': { type: 'string', default: '11,12,13,14,15,16,17,18,19' },
+    'confirm-round': { type: 'string' }, // decide an earlier round again (see above) and stop
     cities: { type: 'string', default: '12' }, // new cities per round
     frames: { type: 'string', default: '2000' }, // frames per city
     epochs: { type: 'string', default: '3' },
@@ -45,6 +53,7 @@ const { values: opt } = parseArgs({
 
 const log = (...a) => console.log(new Date().toISOString().slice(0, 19), ...a);
 const evalSeeds = opt['eval-seeds'].split(',').map(Number);
+const confirmSeeds = opt['confirm-seeds'].split(',').map(Number);
 const MODEL = (ext) => path.join(ROOT, 'models', `policy.${ext}`);
 
 // A child process with its output appended to `logFile`. With `doneWhen`, a process that has
@@ -96,9 +105,93 @@ function highwayShare(bench) {
   return Math.min(0.5, Math.max(0.15, hw / all));
 }
 
-async function benchmark(out, logFile) {
-  await run('node', ['scripts/headless.mjs', 'bench', '--seeds', evalSeeds.join(','), '--out', out], logFile, /^wrote /m);
-  return fs.existsSync(out) ? JSON.parse(fs.readFileSync(out, 'utf8')) : null;
+async function benchmark(out, logFile, seeds = evalSeeds) {
+  await run('node', ['scripts/headless.mjs', 'bench', '--seeds', seeds.join(','), '--out', out], logFile, /^wrote /m);
+  const b = fs.existsSync(out) ? JSON.parse(fs.readFileSync(out, 'utf8')) : null;
+  return b && String(b.seeds) === String(seeds) ? b : null; // every city, or nothing
+}
+
+// Run fn with the candidate in place of the best model, then put the best back.
+async function withCandidate(cand, fn) {
+  const keep = { onnx: fs.readFileSync(MODEL('onnx')), json: fs.readFileSync(MODEL('json')) };
+  try {
+    fs.copyFileSync(`${cand}.onnx`, MODEL('onnx'));
+    fs.copyFileSync(`${cand}.json`, MODEL('json'));
+    return await fn();
+  } finally {
+    fs.writeFileSync(MODEL('onnx'), keep.onnx);
+    fs.writeFileSync(MODEL('json'), keep.json);
+  }
+}
+
+// Contacts by severity. A minor one is with a vehicle at walking pace (MINOR_V): a scrape. Contacts
+// without details (benchmarks from before contactLog) count as serious.
+const MINOR_V = 3; // m/s
+function contactKinds(bench) {
+  let serious = 0, minor = 0;
+  for (const r of bench.results) {
+    const logged = r.contactLog ?? [];
+    for (const c of logged) {
+      if (c.what === 'a pedestrian' || c.v > MINOR_V) serious++;
+      else minor++;
+    }
+    serious += Math.max(0, (r.contacts ?? 0) - logged.length);
+  }
+  return { serious, minor };
+}
+
+// The best model on the confirmation cities, benchmarked once per best model.
+async function bestOnConfirmCities() {
+  const file = path.join(LOOP, 'best-confirm.json');
+  const hash = createHash('sha1').update(fs.readFileSync(MODEL('onnx'))).digest('hex');
+  if (fs.existsSync(file)) {
+    const b = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (b.modelHash === hash && String(b.seeds) === String(confirmSeeds)) return b;
+  }
+  log(`benchmarking the best model on the confirmation cities ${confirmSeeds.join(',')}`);
+  const b = await benchmark(file, path.join(LOOP, 'best-confirm.log'), confirmSeeds);
+  if (b) fs.writeFileSync(file, JSON.stringify({ ...b, modelHash: hash }, null, 2));
+  return b;
+}
+
+// Steps 4-5's decision for a benchmarked candidate: {kept, c, b, confirm?}.
+async function decide(round, dir, cand, bench, best) {
+  const c = summary(bench), b = summary(best);
+  const better = c.takeovers < b.takeovers && c.passed >= b.passed;
+  if (!better || c.contacts <= b.contacts) return { kept: better && c.contacts <= b.contacts, c, b };
+  if (c.contacts !== b.contacts + 1 || contactKinds(bench).serious > contactKinds(best).serious) return { kept: false, c, b };
+  // One extra scrape: bad luck or a habit? Both models drive cities neither has been judged on.
+  log(`round ${round}: one extra low-speed contact with a vehicle; confirming on cities ${confirmSeeds.join(',')}`);
+  const bc = await bestOnConfirmCities();
+  const cc = bc && (await withCandidate(cand, () => benchmark(path.join(dir, 'confirm.json'), path.join(dir, 'confirm.log'), confirmSeeds)));
+  if (!bc || !cc) return { kept: false, c, b, confirm: 'benchmark failed' };
+  const s = summary(cc), t = summary(bc);
+  log(`round ${round}: confirmation: candidate ${s.takeovers} takeovers, ${s.contacts} contacts, ${s.passed}/${s.scenarios} vs best ${t.takeovers}, ${t.contacts}, ${t.passed}/${t.scenarios}`);
+  return { kept: s.contacts === 0 && s.takeovers < t.takeovers && s.passed >= t.passed, c, b, confirm: { candidate: s, best: t } };
+}
+
+// Make the candidate the best model, and commit it.
+function adopt(round, dir, cand, bench, c, b, confirm, note) {
+  fs.copyFileSync(`${cand}.onnx`, MODEL('onnx'));
+  fs.copyFileSync(`${cand}.json`, MODEL('json'));
+  fs.copyFileSync(`${cand}.pt`, MODEL('pt'));
+  fs.copyFileSync(path.join(dir, 'bench.json'), path.join(LOOP, 'best.json'));
+  if (!opt.commit) return;
+  const conf = confirm?.candidate ? `\nConfirmed on cities ${confirmSeeds.join(', ')} (one extra low-speed contact on the benchmark):\n  takeovers  ${confirm.best.takeovers} -> ${confirm.candidate.takeovers}\n  contacts   ${confirm.best.contacts} -> ${confirm.candidate.contacts}\n  scenarios  ${confirm.best.passed}/${confirm.best.scenarios} -> ${confirm.candidate.passed}/${confirm.candidate.scenarios}` : '';
+  execFileSync('git', ['add', 'models/policy.onnx', 'models/policy.json'], { cwd: ROOT });
+  execFileSync('git', ['commit', '-q', '-m', `chore(model): improvement loop round ${round}\n\nBenchmark cities ${evalSeeds.join(', ')}:\n  takeovers  ${b.takeovers} -> ${c.takeovers}\n  contacts   ${b.contacts} -> ${c.contacts}\n  scenarios  ${b.passed}/${b.scenarios} -> ${c.passed}/${c.scenarios}\n  free drive ${b.metersPerTakeover} -> ${c.metersPerTakeover} m per takeover${conf}\n${note}`], { cwd: ROOT });
+  log(`round ${round}: committed`);
+}
+
+// --confirm-round: decide round N again from its saved candidate and benchmark.
+async function confirmRound(n, best, history) {
+  const dir = path.join(LOOP, `round-${n}`), cand = path.join(dir, 'cand');
+  const bench = JSON.parse(fs.readFileSync(path.join(dir, 'bench.json'), 'utf8'));
+  const past = history.filter((h) => h.round === n).at(-1) ?? { round: n, cities: 0, targets: [] };
+  const { kept, c, b, confirm } = await decide(n, dir, cand, bench, best);
+  record({ ...past, date: new Date().toISOString(), best: b, candidate: c, kept, ...(confirm ? { confirm } : {}), note: 'decided again (--confirm-round)' });
+  log(`round ${n}: ${kept ? 'KEPT' : 'rejected'}${confirm ? ' after confirmation' : ''}`);
+  if (kept) adopt(n, dir, cand, bench, c, b, confirm, `Decided again after round ${history.at(-1)?.round}.`);
 }
 
 function record(entry) {
@@ -138,7 +231,9 @@ async function main() {
   const history = fs.existsSync(path.join(LOOP, 'history.jsonl'))
     ? fs.readFileSync(path.join(LOOP, 'history.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
   let nextSeed = Math.max(Number(opt['first-seed']), ...history.map((h) => h.lastSeed + 1));
-  const firstRound = (history.at(-1)?.round ?? 0) + 1;
+  // The highest round so far: a round decided again later appends a line for itself.
+  const firstRound = Math.max(0, ...history.map((h) => h.round)) + 1;
+  if (opt['confirm-round']) return confirmRound(Number(opt['confirm-round']), best, history);
 
   for (let round = firstRound; round < firstRound + Number(opt.rounds); round++) {
     if (fs.existsSync(path.join(LOOP, 'STOP'))) {
@@ -188,39 +283,22 @@ async function main() {
 
     // 4. Benchmark the candidate in place of the best model, then put the best back.
     log(`round ${round}: benchmarking the candidate`);
-    const keep = { onnx: fs.readFileSync(MODEL('onnx')), json: fs.readFileSync(MODEL('json')) };
-    let bench;
-    try {
-      fs.copyFileSync(`${cand}.onnx`, MODEL('onnx'));
-      fs.copyFileSync(`${cand}.json`, MODEL('json'));
-      bench = await benchmark(path.join(dir, 'bench.json'), path.join(dir, 'bench.log'));
-    } finally {
-      fs.writeFileSync(MODEL('onnx'), keep.onnx);
-      fs.writeFileSync(MODEL('json'), keep.json);
-    }
-    if (!bench || String(bench.seeds) !== String(evalSeeds)) {
-      record({ ...entry, error: bench ? `benchmark covered seeds ${bench.seeds} only` : 'benchmark failed' });
+    const bench = await withCandidate(cand, () => benchmark(path.join(dir, 'bench.json'), path.join(dir, 'bench.log')));
+    if (!bench) {
+      record({ ...entry, error: 'benchmark failed or incomplete' });
       log(`round ${round}: benchmark incomplete, candidate not considered`);
       continue;
     }
 
     // 5. Keep it only if it is better without more contacts or failed scenarios (a failure is a
-    // timeout, the car stuck: fewer takeovers alone let round 10 trade 3 of them for 11 takeovers).
-    const c = summary(bench), b = summary(best);
-    const kept = c.takeovers < b.takeovers && c.contacts <= b.contacts && c.passed >= b.passed;
-    record({ ...entry, candidate: c, kept });
-    log(`round ${round}: candidate ${c.takeovers} takeovers, ${c.contacts} contacts, ${c.passed}/${c.scenarios} passed vs best ${b.takeovers}, ${b.contacts}, ${b.passed}/${b.scenarios}: ${kept ? 'KEPT' : 'rejected'}`);
+    // timeout, the car stuck: fewer takeovers alone let round 10 trade 3 of them for 11 takeovers),
+    // or with one extra minor contact that a confirmation run shows was bad luck (see decide).
+    const { kept, c, b, confirm } = await decide(round, dir, cand, bench, best);
+    record({ ...entry, candidate: c, kept, ...(confirm ? { confirm } : {}) });
+    log(`round ${round}: candidate ${c.takeovers} takeovers, ${c.contacts} contacts, ${c.passed}/${c.scenarios} passed vs best ${b.takeovers}, ${b.contacts}, ${b.passed}/${b.scenarios}: ${kept ? 'KEPT' : 'rejected'}${confirm ? ' (after confirmation)' : ''}`);
     if (!kept) continue;
-    fs.copyFileSync(`${cand}.onnx`, MODEL('onnx'));
-    fs.copyFileSync(`${cand}.json`, MODEL('json'));
-    fs.copyFileSync(`${cand}.pt`, MODEL('pt'));
-    fs.copyFileSync(path.join(dir, 'bench.json'), bestFile);
+    adopt(round, dir, cand, bench, c, b, confirm, `Collected ${seeds.length} new cities, focus: ${focus.join(', ')}.`);
     best = bench;
-    if (opt.commit) {
-      execFileSync('git', ['add', 'models/policy.onnx', 'models/policy.json'], { cwd: ROOT });
-      execFileSync('git', ['commit', '-q', '-m', `chore(model): improvement loop round ${round}\n\nBenchmark cities ${evalSeeds.join(', ')}:\n  takeovers  ${b.takeovers} -> ${c.takeovers}\n  contacts   ${b.contacts} -> ${c.contacts}\n  scenarios  ${b.passed}/${b.scenarios} -> ${c.passed}/${c.scenarios}\n  free drive ${b.metersPerTakeover} -> ${c.metersPerTakeover} m per takeover\nCollected ${seeds.length} new cities, focus: ${focus.join(', ')}.`], { cwd: ROOT });
-      log(`round ${round}: committed`);
-    }
   }
   log('done');
 }
