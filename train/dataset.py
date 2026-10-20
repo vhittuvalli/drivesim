@@ -36,6 +36,16 @@ def lane_command(r):
         r['cmd_dist'] = None
     return r
 LIGHTS = ['none', 'red', 'yellow', 'green']  # must match src/labels.js
+
+
+def ot_input(r):
+    """The overtake input (src/labels.js overtakePhase, src/neural.js): [going around, merging back,
+    phase unknown]. Rows from before the phase was recorded know only that an overtake was on, not
+    its phase: flagged unknown, so they still teach overtakes from the images."""
+    ph = r.get('ot_phase')
+    if ph is None:
+        return [0.0, 0.0, 1.0] if r.get('overtaking') and r.get('road') != 'highway' else [0.0, 0.0, 0.0]
+    return [float(ph == 1), float(ph == 2), 0.0]
 # Beyond this distance a lamp is a pixel or two even in the traffic-light camera, so the light
 # label isn't learnable there: it is left out of the light loss (driving labels are unaffected).
 LIGHT_READABLE = 50.0  # m to the intersection
@@ -166,7 +176,7 @@ def split(runs, val_frac=0.1, block=200):
 
 def sample_weight(r):
     """Oversample the informative moments: turns, lane changes, speed changes, pulling away from a
-    stop and hard braking. Undersample waiting at lights."""
+    stop, hard braking, yielding to pedestrians and reacting to other cars. Undersample waiting at lights."""
     w = 1.0
     if r['command'] != 'straight' and r['cmd_dist'] is not None and r['cmd_dist'] < 30:
         w *= 2.5
@@ -186,6 +196,17 @@ def sample_weight(r):
     if r.get('overtaking'):
         w *= 2
     if ttc_target(r)[0] > 0.4:  # closing fast on something: the braking decisions
+        w *= 2
+    if r.get('reason') == 'pedestrian':
+        # Yielding to someone on the road, mostly on the crosswalk of a street we turn into: 1.6% of
+        # frames, 4% of draws before this, and the network hit pedestrians there (turn-*-ped). ~12%.
+        w *= 3
+    if r.get('reason') == 'crossing':
+        # Reacting to a car crossing or pulling into our path (pull-out, red-runner): 0.1% of frames,
+        # and the network braked late in every run of those scenarios. ~2% of draws.
+        w *= 6
+    elif r.get('reason') == 'vehicle' and r['v_target'] < r['v'] - 2:
+        # Braking hard for a car ahead (a jam, a slower car in the lane): 4% of draws before, ~7.5%.
         w *= 2
     return w
 
@@ -234,6 +255,7 @@ class DriveDataset(Dataset):
             'ttc': torch.tensor(ttc_target(r)[0], dtype=torch.float32),
             'ttc_mask': torch.tensor(ttc_target(r)[1], dtype=torch.float32),
             'speed': torch.tensor([max(0.0, v)], dtype=torch.float32),
+            'ot': torch.tensor(ot_input(r), dtype=torch.float32),
             'wp': torch.from_numpy(wp),
             'wp_mask': torch.from_numpy(mask),
             'cmd': torch.tensor(COMMANDS.index(r['command'])),

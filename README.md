@@ -2,6 +2,10 @@
 
 Browser-based self-driving simulator (three.js / WebGL, no build step).
 
+**Live demo:** [vhittuvalli.github.io/drivesim](https://vhittuvalli.github.io/drivesim/?neural=1&cam=chase) (the
+neural driver at the wheel, the expert as its safety driver; press `N` for the network's view). It is the
+same static site; only collecting training data needs the dev server below.
+
 ## Run
 
     npm run dev        # static server on :8000 with caching disabled (scripts/serve.py)
@@ -12,7 +16,8 @@ URL params: `?seed=<int>` (city layout), `?hour=4..22` (time of day), `?cam=chas
 `?road=highway` (start on the highway), `?hwcars=0..160` (highway traffic),
 `?weather=clear|rain|fog|snow`, `?scenario=<id>` (see below), `?debug=1` (planner overlay), `?speed=1|2|4|8|16`,
 `?fx=0` (no post-processing), and for the learning tools `?collect=<frames>&noise=0..1`, `?neural=1`,
-`?bench=1&trials=<n>` (see [Learning to drive](#learning-to-drive)).
+`?bench=1&trials=<n>` (see [Learning to drive](#learning-to-drive)), `?safety=lenient` (the safety driver
+steps in only for danger: collision risk, an imminent scrape, a red light, or the car outside its lane).
 The **Link** button copies a URL with the current setup.
 
 Keys: `1`–`4` switch camera, `Space` pauses, `M` take the wheel / hand back, `O` planner overlay,
@@ -55,8 +60,11 @@ running out of time).
 | `pull-out` | A parked car pulls into the lane just ahead |
 | `red-runner` | You have a green light; a car on the cross street runs its red |
 | `unprotected-left` | Left turn on green through a stream of oncoming traffic |
+| `turn-right-ped` | Right turn on green while a pedestrian crosses the street you turn into |
+| `turn-left-ped` | Same for a left turn |
 | `hw-cut-in` | Highway, 100 km/h: a slower car swerves into your lane 14 m ahead and brakes; a car alongside blocks the other lane |
 | `hw-stalled` | A broken-down car in the right lane; find a gap in the middle-lane traffic and move over |
+| `hw-pass` | A slower car ahead in the middle lane, cars alongside on both sides: wait for a gap, change lanes and pass |
 | `hw-jam` | Traffic ahead brakes at 6.5 m/s² to a standstill in every lane, waits, then moves off |
 
 ### Planner overlay (`O`)

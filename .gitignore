@@ -6,3 +6,4 @@ models/*.pt
 __pycache__/
 models/loop/round-*/
 models/loop/*.log
+.cdn-cache/

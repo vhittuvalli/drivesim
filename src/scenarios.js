@@ -5,7 +5,7 @@
 //
 // A site is a start node A = (i, j) and direction d. N1 = A + d is the next intersection
 // (always interior, so cross streets exist on both sides) and N2 = A + 2d the one after.
-import { GRID, PITCH, LANE_W, nodePos } from './config.js';
+import { GRID, PITCH, LANE_W, ROAD_W, CROSSWALK_NEAR, CROSSWALK_FAR, nodePos } from './config.js';
 import { HALF_LEN } from './planner.js';
 import { HW, HW_LENGTH, loopDist } from './highway.js';
 
@@ -61,6 +61,42 @@ const VAN = { type: 'van', paint: 0xf2f2f0 };
 function passed(w, run, car, margin = 6) {
   const a = car.agent, gap = egoAlong(w, run) - alongOf(run.site, a.x, a.z) - HALF_LEN - a.halfLen;
   return gap > margin && egoInLane(w, run);
+}
+
+// Turning at N1 while a pedestrian crosses the street we turn into, on the green we turn on (they
+// walk with the parallel green, so a turning car meets them there). `side` is 'right' or 'left'.
+function turnPed(side) {
+  return {
+    name: `${side === 'right' ? 'Right' : 'Left'} turn across a crosswalk`,
+    goal: `Turn ${side} on green while a pedestrian is crossing the street you turn into: give way`,
+    timeout: 45,
+    setup(w, run) {
+      const site = setupSite(w, run, { egoAlong: 20, egoV: 8, choose: turns(side) });
+      // The arm we turn into, and the crosswalk across it.
+      const e = side === 'right' ? site.perp : [-site.perp[0], -site.perp[1]];
+      const N = nodePos(...site.n1), along = (CROSSWALK_NEAR + CROSSWALK_FAR) / 2, curb = ROAD_W / 2 + 1.5;
+      // From either curb: the near one (our lane after the turn is on the near side for a right
+      // turn, the far side for a left) puts them in front of us sooner.
+      const s0 = w.rand() < 0.5 ? 1 : -1;
+      const at = (s) => ({ x: N.x + e[0] * along + site.d[0] * s * curb, z: N.z + e[1] * along + site.d[1] * s * curb });
+      const from = at(s0), to = at(-s0);
+      run.e = e;
+      run.ped = w.spawnPed(from.x, from.z, [{ x: to.x, z: to.z, mode: 'cross' }], { speed: 1.2 + 0.4 * w.rand() });
+    },
+    update(w, run) {
+      // Step off the curb as we near the intersection, so they are on the crosswalk when we turn.
+      if (!run.flags.go && egoAlong(w, run) > PITCH - 25) {
+        run.flags.go = true;
+        run.ped.queue[0].go = true;
+      }
+      if (run.ped.agent.crossing) run.flags.minV = Math.min(run.flags.minV ?? Infinity, w.car.v);
+    },
+    check(w, run) {
+      const N = nodePos(...run.site.n1), e = run.e;
+      if ((w.car.x - N.x) * e[0] + (w.car.z - N.z) * e[1] < 25 || run.ped.agent.crossing) return null;
+      return run.flags.minV < 1 ? 'Stopped for the pedestrian, then turned' : 'Gave way to the pedestrian and turned';
+    },
+  };
 }
 
 // ---------- highway ----------
@@ -247,6 +283,9 @@ export const SCENARIOS = {
       return run.flags.yielded ? 'Yielded to oncoming traffic, then turned' : 'Completed the left turn';
     },
   },
+  'turn-right-ped': turnPed('right'),
+  'turn-left-ped': turnPed('left'),
+
   'hw-cut-in': {
     road: 'highway',
     name: 'Highway: aggressive cut-in',
@@ -297,6 +336,22 @@ export const SCENARIOS = {
       for (const dq of [-55, 25, 75]) hwCar(w, run, 1, dq, { desired: 24 });
     },
     check: (w, run) => (hwGap(w, run.stalled) < -2 * HALF_LEN - 8 && egoInHwLane(w) ? 'Changed lanes and passed the stalled car' : null),
+  },
+
+  'hw-pass': {
+    road: 'highway',
+    name: 'Highway: pass a slower car',
+    goal: 'A slower car ahead in your lane, traffic beside you: wait for a gap, change lanes and pass',
+    timeout: 60,
+    setup(w, run) {
+      setupHighway(w, run, { lane: 1, v: 27 });
+      run.slow = hwCar(w, run, 1, 70, { desired: 19, paint: 0x6b4f2a });
+      // Alongside on both sides: one pulls ahead and one drops back, so a gap opens on each side
+      // after a few seconds.
+      hwCar(w, run, 0, 4, { desired: 31, paint: 0x1f3a66 });
+      hwCar(w, run, 2, -2, { desired: 23, paint: 0x5a5f66 });
+    },
+    check: (w, run) => (hwGap(w, run.slow) < -2 * HALF_LEN - 10 && egoInHwLane(w) ? 'Changed lanes and passed the slower car' : null),
   },
 
   'hw-jam': {

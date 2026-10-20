@@ -18,7 +18,7 @@
 // the path and its speed) get the expert's car-following model (IDM) as a second cap.
 import { clamp, WHEELBASE, MAX_STEER, conditions } from './config.js';
 import { throttleFor, idm, IDM, HALF_LEN } from './planner.js';
-import { commandOf, toEgo, TARGET_HORIZON, COMMANDS } from './labels.js';
+import { commandOf, toEgo, TARGET_HORIZON, COMMANDS, overtakePhase } from './labels.js';
 
 const ORT_VERSION = '1.30.0';
 const ORT_DIST = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VERSION}/dist/`;
@@ -219,6 +219,11 @@ export class NeuralDriver {
         image: new Tensor('float32', toTensorData(rgb), [1, 3, this.inH, this.inW]),
         speed: new Tensor('float32', Float32Array.of(v), [1, 1]),
       };
+      // The expert's overtake phase, like the turn command (networks trained with it).
+      if (this.meta.inputs.overtake) {
+        const ph = overtakePhase(expert);
+        feeds.overtake = new Tensor('float32', Float32Array.of(ph === 1 ? 1 : 0, ph === 2 ? 1 : 0, 0), [1, 3]);
+      }
       if (this.usesTele) feeds.tele = new Tensor('float32', toTensorData(tele), [1, 3, ...this.meta.inputs.tele.slice(2)]);
       if (this.pastDt !== null) {
         // The frame closest to dt ago (observations are 0.1 s apart); the current one at first.

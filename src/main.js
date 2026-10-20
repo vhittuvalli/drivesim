@@ -176,6 +176,7 @@ async function init() {
   scene.add(car.mesh);
   setWeather(settings.weather);
   world = new World({ rand, car, fleet, parked, cars: settings.cars, peds: settings.peds, doubleParked: settings.vans, highway: settings.hwCars });
+  world.safety.lenient = params.get('safety') === 'lenient';
   if (settings.road === 'highway') world.setRoad('highway');
   city.setSignalColors((n, a) => world.signals.state(n, a));
   crowdView = new CrowdRenderer(scene, rand);

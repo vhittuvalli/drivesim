@@ -1,4 +1,5 @@
 torch>=2.2
+torchvision>=0.17  # the pretrained MobileNetV3 encoder (train.py --encoder mobilenet)
 numpy
 pillow
 onnx
