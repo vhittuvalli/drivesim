@@ -17,7 +17,7 @@
 // SSH_KEY=<private key path>). Every pod is deleted when the script
 // ends, and also from the pod itself after --max-hours, should the Mac sleep or the script die.
 //
-// Budget: Runpod spending since RUNPOD_BUDGET_SINCE stays under RUNPOD_BUDGET dollars (default $15
+// Budget: Runpod spending since RUNPOD_BUDGET_SINCE stays under RUNPOD_BUDGET dollars (default $28
 // since 2026-10-13). A pod is created only if the spend so far plus the expected cost of the run fits;
 // a running pod is deleted when the budget runs out (by this script, and by the pod's own timer).
 // The script then exits with code 3 (improve.mjs ends the loop on it).
@@ -35,7 +35,7 @@ const FAKE = process.env.RT_FAKE_POD;
 const VOL = FAKE ? `${FAKE}/workspace/drivesim` : '/workspace/drivesim'; // network volume: chunks/, out/, pip cache
 const WORK = FAKE ? `${FAKE}/root` : '/root'; // the pod's own disk
 const NAME = 'drivesim-train'; // every pod this script creates is named this (cleanup relies on it)
-const BUDGET = Number(process.env.RUNPOD_BUDGET ?? 15); // dollars
+const BUDGET = Number(process.env.RUNPOD_BUDGET ?? 28); // dollars
 const SINCE = process.env.RUNPOD_BUDGET_SINCE ?? '2026-10-13T00:00:00Z';
 const LEDGER = path.join(ROOT, 'models', 'loop', 'runpod-spend.jsonl'); // one line per pod: what it cost
 const OVER_BUDGET = 3; // exit code
@@ -53,7 +53,7 @@ const { positionals, values: opt } = parseArgs({
     // one data center. The RTX PRO 4500 (32 GB) is $0.72/h there.
     gpu: { type: 'string', default: 'NVIDIA GeForce RTX 4090,NVIDIA RTX PRO 4500 Blackwell' },
     image: { type: 'string', default: 'runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404' },
-    workers: { type: 'string', default: '8' },
+    workers: { type: 'string', default: '16' }, // data loaders: decoding the JPEGs, not the GPU, limits training
     'max-hours': { type: 'string', default: '4' },
     parallel: { type: 'string', default: '4' }, // upload streams
     chunk: { type: 'string', default: '48' }, // runs per uploaded tar
@@ -143,7 +143,7 @@ async function createPod(kind) {
     name: NAME, image: opt.image, cloud: 'SECURE', ports: ['22/tcp'], env: { PUBLIC_KEY: pub },
     ...(kind === 'bench' ? {} : { dataCenterIds: [vol.dataCenter], mounts: { network: [{ volumeId: vol.id, path: '/workspace' }] } }),
     ...{
-      gpu: { gpu: { id: opt.gpu.split(',')[0], count: 1, minCudaVersion: '12.8', minVcpuCountPerGpu: 8 }, disk: 120 },
+      gpu: { gpu: { id: opt.gpu.split(',')[0], count: 1, minCudaVersion: '12.8', minVcpuCountPerGpu: 16 }, disk: 120 },
       cpu: { cpu: { id: 'cpu3c', vcpuCount: 2 }, disk: 20 },
       bench: { cpu: { id: opt.cpu, vcpuCount: Number(opt.vcpus) }, disk: 20 },
     }[kind],
