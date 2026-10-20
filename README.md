@@ -2,6 +2,10 @@
 
 Browser-based self-driving simulator (three.js / WebGL, no build step).
 
+**Live demo:** [vhittuvalli.github.io/drivesim](https://vhittuvalli.github.io/drivesim/?neural=1&cam=chase) (the
+neural driver at the wheel, the expert as its safety driver; press `N` for the network's view). It is the
+same static site; only collecting training data needs the dev server below.
+
 ## Run
 
     npm run dev        # static server on :8000 with caching disabled (scripts/serve.py)
